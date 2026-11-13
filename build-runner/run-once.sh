@@ -56,7 +56,7 @@ echo "Starting ephemeral runner ${runner_name}; it will exit after one job compl
 
 # In rootless Docker, container GID 0 maps to the daemon user's primary host
 # group. The socket's numeric host GID is not mapped into the container.
-docker run --rm --init \
+docker run --rm \
   --name "${runner_name}" \
   --group-add 0 \
   --volume "${DOCKER_SOCKET}:/var/run/docker.sock" \
