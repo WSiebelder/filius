@@ -10,6 +10,9 @@ readonly TOKEN_FILE="${GITHUB_PAT_FILE:-/etc/filius/github-token}"
 readonly RUNNER_DOCKER_USER="${RUNNER_DOCKER_USER:-filius-runner}"
 readonly RUNNER_HOME="${RUNNER_HOME:-/var/lib/filius-runner}"
 readonly DEPLOYMENTS_DIR="${FILIUS_DEPLOYMENTS_DIR:-${RUNNER_HOME}/deployments}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+readonly COMPOSE_FILE="${FILIUS_RUNNER_COMPOSE_FILE:-${REPO_DIR}/compose.runners.yaml}"
 
 usage() {
   echo "Usage: sudo $0 https://github.com/OWNER/REPOSITORY" >&2
@@ -23,6 +26,9 @@ id "${RUNNER_DOCKER_USER}" >/dev/null 2>&1 || { echo "Rootless Docker user not f
 runner_uid="$(id -u "${RUNNER_DOCKER_USER}")"
 readonly DOCKER_SOCKET="${DOCKER_SOCKET:-/run/user/${runner_uid}/docker.sock}"
 [[ -S "${DOCKER_SOCKET}" ]] || { echo "Rootless Docker socket not found: ${DOCKER_SOCKET}. Run rootless-docker/setup.sh first." >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || { echo "Docker CLI is required." >&2; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 plugin is required (docker compose)." >&2; exit 1; }
+[[ -f "${COMPOSE_FILE}" ]] || { echo "Compose file not found: ${COMPOSE_FILE}" >&2; exit 1; }
 if [[ "${RUNNER_KIND}" == deploy && ! -d "${DEPLOYMENTS_DIR}" ]]; then
   echo "Deployment directory not found: ${DEPLOYMENTS_DIR}. Run rootless-docker/setup.sh first." >&2
   exit 1
@@ -78,24 +84,15 @@ runner_token="$(jq -er '.token' <<<"${api_response}")"
 unset api_response
 echo "Starting ephemeral runner ${runner_name}; it will exit after one job completes."
 
-docker_args=(
-  --rm
-  --name "${runner_name}" \
-  --volume "${DOCKER_SOCKET}:/var/run/docker.sock"
-)
+export DOCKER_SOCKET RUNNER_NAME="${runner_name}" RUNNER_TOKEN="${runner_token}" GITHUB_URL="${github_url}"
+export RUNNER_IMAGE="${IMAGE}" FILIUS_DEPLOYMENTS_DIR="${DEPLOYMENTS_DIR}"
 if [[ "${RUNNER_KIND}" == deploy ]]; then
-  docker_args+=(
-    --volume "${DEPLOYMENTS_DIR}:${DEPLOYMENTS_DIR}"
-    --env "FILIUS_DEPLOYMENTS_DIR=${DEPLOYMENTS_DIR}"
-  )
+  compose_service=deployment-runner
+else
+  compose_service=build-runner
 fi
-docker_args+=(
-  --env "GITHUB_URL=${github_url}"
-  --env "RUNNER_TOKEN=${runner_token}"
-  --env "RUNNER_NAME=${runner_name}"
-  "${IMAGE}"
-)
-docker run "${docker_args[@]}"
+docker compose --project-name filius-runners --file "${COMPOSE_FILE}" run \
+  --rm --no-deps --name "${runner_name}" "${compose_service}"
 
 unset runner_token
 echo "Runner job completed; the ephemeral runner container has been removed."

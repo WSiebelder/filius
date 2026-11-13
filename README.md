@@ -6,8 +6,8 @@ Self-hosted GitHub Actions runner tools for finius. The setup builds an ephemera
 
 1. `rootless-docker/setup.sh` creates the locked `filius-runner` Linux account, its private home, and the persistent deployment directory, then configures a rootless Docker daemon for it.
 2. `build-runner/build.sh` builds `filius-builder:local`; `deployment-runner/build.sh` adds Docker Compose and builds `filius-deployer:local` on the same daemon.
-3. The corresponding `run-once.sh` launcher uses a GitHub fine-grained personal access token stored on finius to request a short-lived runner registration token.
-4. The runner container waits for one matching job, executes it, deregisters, and exits. Docker removes the runner container afterward. Containers started by a deployment job remain running in the rootless daemon.
+3. `runner-pool.sh` supervises two build workers and one deployment worker. Each worker uses the GitHub fine-grained personal access token stored on finius to request a fresh, short-lived runner registration token for each job.
+4. Each ephemeral runner container is started through `compose.runners.yaml`, waits for one matching job, executes it, deregisters, and exits. Compose removes the runner container afterward. Containers started by a deployment job remain running in the rootless daemon.
 
 The build runner has labels `self-hosted`, `linux`, `x64`, and `docker-build`; the deployment runner uses `self-hosted`, `linux`, `x64`, and `docker-deploy`. The example workflow in `.github/workflows/build.yml` tests Docker access. `.github/workflows/build-runner-image.yml` rebuilds both runner images when their Dockerfiles or build inputs change; updated images are used the next time a runner starts.
 
@@ -41,21 +41,21 @@ The runner version is pinned in `build-runner/Dockerfile`, and self-updates are 
 
 The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, delegates the CPU, cpuset, I/O, memory, and PID cgroup controllers to that user's systemd manager, enables the daemon at boot, and leaves the host's existing Docker daemon running. If the delegation drop-in changes, the setup restarts the `filius-runner` user manager and its rootless Docker daemon; run it only when no runner job is active. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon. Resource-controller warnings can remain if the host does not use unified cgroup v2 or lacks those controllers.
 
-### Start one runner
+### Start the runner pool
 
-Start the runner before pushing the workflow if you want that push to be picked up immediately. Pass the repository URL:
+After setup, start the pool on finius with:
 
 ```sh
-sudo /opt/filius/build-runner/run-once.sh https://github.com/OWNER/REPOSITORY
+sudo /opt/filius/runner-pool.sh https://github.com/OWNER/REPOSITORY
 ```
 
-The command stays open while the runner waits for a matching job. When one job finishes, the runner deregisters, the container is removed, and the command exits. Check **Repository → Settings → Actions → Runners** to see whether GitHub reports it as online while it waits.
+This foreground host script keeps two build workers and one deployment worker available. Each worker repeatedly starts a fresh one-job runner container with Docker Compose, so it requests a new registration token for every job. Press Ctrl-C to stop the pool. Check **Repository → Settings → Actions → Runners** to see online ephemeral runners while they wait.
 
 The example workflow targets `runs-on: [self-hosted, docker-build]`. A workflow with different labels will remain queued until a matching runner is available. See [GitHub's runner selection docs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
 
 ### Deploy one job
 
-Start an ephemeral deployment runner for the repository:
+To run only one ephemeral deployment runner instead of the pool:
 
 ```sh
 sudo /opt/filius/deployment-runner/run-once.sh https://github.com/OWNER/REPOSITORY
@@ -115,4 +115,6 @@ deployment-runner/build.sh     Build the deployment runner image
 deployment-runner/run-once.sh  Start one ephemeral deployment job
 .github/workflows/build.yml    Runner smoke-test workflow
 .github/workflows/build-runner-image.yml  Rebuild runner image when its inputs change
+compose.runners.yaml           Compose definitions for one-job runner containers
+runner-pool.sh                 Host supervisor for 2 build and 1 deploy worker
 ```

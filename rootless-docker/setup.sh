@@ -75,6 +75,17 @@ if ! command -v docker >/dev/null; then
   exit 1
 fi
 
+if ! docker compose version >/dev/null 2>&1; then
+  if apt-cache show docker-compose-v2 >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends docker-compose-v2
+  elif apt-cache show docker-compose-plugin >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends docker-compose-plugin
+  else
+    echo "Docker Compose v2 plugin is missing. Install docker-compose-v2 or docker-compose-plugin, then rerun." >&2
+    exit 1
+  fi
+fi
+
 if ! command -v dockerd-rootless-setuptool.sh >/dev/null; then
   if apt-cache show docker-ce-rootless-extras >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends docker-ce-rootless-extras

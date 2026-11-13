@@ -100,6 +100,18 @@ runuser -u "${RUNNER_USER}" -- env \
   USER="${RUNNER_USER}" \
   LOGNAME="${RUNNER_USER}" \
   DOCKER_HOST="unix://${docker_socket}" \
+  DOCKER_SOCKET="${docker_socket}" \
+  GITHUB_URL="https://github.com/${owner}/${repo}" \
+  RUNNER_TOKEN="setup-validation-placeholder" \
+  RUNNER_NAME="setup-validation-placeholder" \
+  FILIUS_DEPLOYMENTS_DIR="${RUNNER_HOME}/deployments" \
+  docker compose --project-name filius-runners --file "${SCRIPT_DIR}/compose.runners.yaml" config --quiet
+
+runuser -u "${RUNNER_USER}" -- env \
+  HOME="${RUNNER_HOME}" \
+  USER="${RUNNER_USER}" \
+  LOGNAME="${RUNNER_USER}" \
+  DOCKER_HOST="unix://${docker_socket}" \
   docker image inspect filius-builder:local >/dev/null
 runuser -u "${RUNNER_USER}" -- env \
   HOME="${RUNNER_HOME}" \
@@ -110,5 +122,5 @@ runuser -u "${RUNNER_USER}" -- env \
 
 echo
 echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
-echo "To wait for one job, run: sudo ${SCRIPT_DIR}/build-runner/run-once.sh ${github_url}"
-echo "For a deployment job, run: sudo ${SCRIPT_DIR}/deployment-runner/run-once.sh ${github_url}"
+echo "To start 2 build workers and 1 deployment worker, run: sudo ${SCRIPT_DIR}/runner-pool.sh ${github_url}"
+echo "The pool runs in the foreground; press Ctrl-C to stop it. Runner containers are started with Docker Compose."
