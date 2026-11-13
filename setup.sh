@@ -11,7 +11,12 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ ! -r /etc/os-release ]] || ! grep -Eq '^(ID|ID_LIKE)=("?(debian|ubuntu)' /etc/os-release; then
+if [[ ! -r /etc/os-release ]]; then
+  echo "This installer currently supports Debian or Ubuntu." >&2
+  exit 1
+fi
+host_os="$(. /etc/os-release; printf '%s %s' "${ID:-}" "${ID_LIKE:-}")"
+if [[ ! " ${host_os,,} " =~ (debian|ubuntu) ]]; then
   echo "This installer currently supports Debian or Ubuntu." >&2
   exit 1
 fi
