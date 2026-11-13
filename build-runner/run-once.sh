@@ -38,7 +38,6 @@ fi
 unset GITHUB_PAT_FILE
 
 docker info >/dev/null
-docker_gid="$(stat -c '%g' "${DOCKER_SOCKET}")"
 runner_name="filius-build-$(hostname -s)-$(date +%s)"
 api_url="https://api.github.com/repos/${owner}/${repo}/actions/runners/registration-token"
 
@@ -55,9 +54,11 @@ runner_token="$(jq -er '.token' <<<"${api_response}")"
 unset api_response
 echo "Starting ephemeral runner ${runner_name}; it will exit after one job completes."
 
+# In rootless Docker, container GID 0 maps to the daemon user's primary host
+# group. The socket's numeric host GID is not mapped into the container.
 docker run --rm --init \
   --name "${runner_name}" \
-  --group-add "${docker_gid}" \
+  --group-add 0 \
   --volume "${DOCKER_SOCKET}:/var/run/docker.sock" \
   --env "GITHUB_URL=${github_url}" \
   --env "RUNNER_TOKEN=${runner_token}" \
