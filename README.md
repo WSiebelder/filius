@@ -35,6 +35,8 @@ sudo ./setup.sh
 
 The installer checks for `curl` and `jq`, then prompts for a fine-grained PAT if `/etc/filius/github-token` does not exist yet. Create a PAT for the repository that will use the runner, with **Repository permissions → Administration: Read and write**. The account creating the token must be an administrator of that repository. GitHub requires this permission for the API that creates runner registration tokens; those temporary registration tokens expire after one hour. See [GitHub's self-hosted runner API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository).
 
+The selected repository URL is saved in `/etc/filius/repository-url`. On later setup runs, it appears as the prompt default; press Enter to keep it or enter a different repository URL.
+
 The PAT is saved outside the checkout with root-only permissions. The installer then asks for a repository URL, checks that GitHub accepts the PAT, sets up rootless Docker, and builds `filius-builder:local` and `filius-deployer:local`. It does not start a runner or run a workflow.
 
 The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).

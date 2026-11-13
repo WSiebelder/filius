@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly TOKEN_FILE="${GITHUB_PAT_FILE:-/etc/filius/github-token}"
+readonly REPO_FILE="${FILIUS_REPO_FILE:-/etc/filius/repository-url}"
 readonly RUNNER_USER="${RUNNER_USER:-filius-runner}"
 readonly RUNNER_HOME="${RUNNER_HOME:-/var/lib/filius-runner}"
 
@@ -46,7 +47,14 @@ if [[ ! -s "${TOKEN_FILE}" ]]; then
 fi
 chmod 600 "${TOKEN_FILE}"
 
-read -r -p "GitHub repository URL (https://github.com/OWNER/REPOSITORY): " github_url
+configured_repo=""
+if [[ -s "${REPO_FILE}" ]]; then
+  IFS= read -r configured_repo <"${REPO_FILE}" || true
+  configured_repo="${configured_repo%/}"
+fi
+prompt_repo="${configured_repo:-https://github.com/OWNER/REPOSITORY}"
+read -r -p "GitHub repository URL [${prompt_repo}] (press Enter to keep): " github_url
+github_url="${github_url:-${configured_repo}}"
 github_url="${github_url%/}"
 if [[ ! "${github_url}" =~ ^https://github\.com/([^/]+)/([^/]+)$ ]]; then
   echo "Expected a repository URL like https://github.com/OWNER/REPOSITORY" >&2
@@ -68,6 +76,10 @@ unset github_pat
 discarded_runner_token="$(jq -er '.token' <<<"${api_response}")"
 unset api_response discarded_runner_token
 echo "GitHub accepted the credential and returned a registration token. The test token was discarded."
+install -d -m 700 "$(dirname -- "${REPO_FILE}")"
+umask 077
+printf '%s\n' "${github_url}" >"${REPO_FILE}"
+chmod 600 "${REPO_FILE}"
 
 echo "Setting up rootless Docker..."
 bash "${SCRIPT_DIR}/rootless-docker/setup.sh"
