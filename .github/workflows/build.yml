@@ -1,0 +1,32 @@
+name: Build runner smoke test
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hello-world:
+    name: Hello world and Docker build
+    runs-on: [self-hosted, docker-build]
+    steps:
+      - name: Say hello
+        run: echo "Hello from the filius build runner!"
+
+      - name: Check Docker connection
+        run: docker version
+
+      - name: Build a tiny test image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --tag "filius-runner-smoke:${IMAGE_TAG}" - <<'DOCKERFILE'
+          FROM alpine:3.21
+          CMD ["echo", "Hello from a container built by the runner!"]
+          DOCKERFILE
+          docker image inspect "filius-runner-smoke:${IMAGE_TAG}" >/dev/null
+          echo "The runner built the test image successfully."
