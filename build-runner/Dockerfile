@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RUNNER_VERSION=2.337.0
+ARG RUNNER_VERSION=2.338.2
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -27,6 +27,7 @@ RUN apt-get update \
 COPY --chmod=0755 runner-entrypoint.sh /usr/local/bin/runner-entrypoint
 
 ENV RUNNER_ALLOW_RUNASROOT=0 \
+    RUNNER_VERSION=${RUNNER_VERSION} \
     RUNNER_NAME=build-runner \
     RUNNER_LABELS=self-hosted,linux,x64,docker-build \
     RUNNER_EPHEMERAL=true

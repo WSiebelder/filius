@@ -1,0 +1,27 @@
+name: Build runner image
+
+on:
+  push:
+    paths:
+      - "build-runner/Dockerfile"
+      - "build-runner/runner-entrypoint.sh"
+      - "build-runner/build.sh"
+      - ".github/workflows/build-runner-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-runner-image:
+    name: Rebuild filius-builder:local
+    runs-on: [self-hosted, docker-build]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build runner image in rootless Docker
+        run: bash build-runner/build.sh
+
+      - name: Verify runner image
+        run: docker image inspect filius-builder:local --format '{{.Id}}'

@@ -9,7 +9,7 @@ Self-hosted GitHub Actions runner tools for finius. The current setup is a first
 3. `build-runner/run-once.sh` uses a GitHub fine-grained personal access token stored on finius to request a short-lived runner registration token.
 4. The script starts the runner container. It registers with GitHub, waits for one matching job, runs it, deregisters, and exits. Docker removes the container afterward.
 
-The runner currently has the labels `self-hosted`, `linux`, `x64`, and `docker-build`. The example workflow in `.github/workflows/build.yml` runs on every branch push or by manual dispatch. It checks the Docker connection and builds a tiny test image.
+The runner currently has the labels `self-hosted`, `linux`, `x64`, and `docker-build`. The example workflow in `.github/workflows/build.yml` runs on every branch push or by manual dispatch. It checks the Docker connection and builds and runs a tiny test image. `.github/workflows/build-runner-image.yml` rebuilds `filius-builder:local` when the runner Dockerfile, entrypoint, or build script changes; the new image is used the next time the runner is started.
 
 ## Requirements
 
@@ -34,6 +34,8 @@ sudo ./setup.sh
 The installer checks for `curl` and `jq`, then prompts for a fine-grained PAT if `/etc/filius/github-token` does not exist yet. Create a PAT for the repository that will use the runner, with **Repository permissions → Administration: Read and write**. The account creating the token must be an administrator of that repository. GitHub requires this permission for the API that creates runner registration tokens; those temporary registration tokens expire after one hour. See [GitHub's self-hosted runner API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository).
 
 The PAT is saved outside the checkout with root-only permissions. The installer then asks for a repository URL, checks that GitHub accepts the PAT, sets up rootless Docker, and builds `filius-builder:local` using the rootless daemon. It does not start a runner or run a workflow.
+
+The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
 The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, enables that user's daemon at boot, and leaves the host's existing Docker daemon running. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon.
 
@@ -70,4 +72,5 @@ build-runner/runner-entrypoint.sh  Runner registration and execution
 build-runner/build.sh          Build the runner image
 build-runner/run-once.sh       Request a token and run one ephemeral job
 .github/workflows/build.yml    Runner smoke-test workflow
+.github/workflows/build-runner-image.yml  Rebuild runner image when its inputs change
 ```
