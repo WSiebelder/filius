@@ -6,6 +6,8 @@ on:
       - "build-runner/Dockerfile"
       - "build-runner/runner-entrypoint.sh"
       - "build-runner/build.sh"
+      - "deployment-runner/Dockerfile"
+      - "deployment-runner/build.sh"
       - ".github/workflows/build-runner-image.yml"
   workflow_dispatch:
 
@@ -14,7 +16,7 @@ permissions:
 
 jobs:
   build-runner-image:
-    name: Rebuild filius-builder:local
+    name: Rebuild runner images
     runs-on: [self-hosted, docker-build]
     steps:
       - name: Check out repository
@@ -23,5 +25,10 @@ jobs:
       - name: Build runner image in rootless Docker
         run: bash build-runner/build.sh
 
-      - name: Verify runner image
-        run: docker image inspect filius-builder:local --format '{{.Id}}'
+      - name: Build deployment runner image
+        run: bash deployment-runner/build.sh
+
+      - name: Verify runner images
+        run: |
+          docker image inspect filius-builder:local --format '{{.Id}}'
+          docker image inspect filius-deployer:local --format '{{.Id}}'

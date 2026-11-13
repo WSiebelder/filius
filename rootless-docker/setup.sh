@@ -34,6 +34,15 @@ else
   fi
 fi
 
+# The parent stays private on finius; the deployment directory must be
+# writable by the non-root UID used inside the ephemeral runner container.
+runner_group="$(id -gn "${RUNNER_USER}")"
+chmod 700 "${RUNNER_HOME}"
+deployment_dir="${RUNNER_HOME}/deployments"
+install -d -o "${RUNNER_USER}:${runner_group}" -m 1777 "${deployment_dir}"
+chown "${RUNNER_USER}:${runner_group}" "${deployment_dir}"
+chmod 0777 "${deployment_dir}"
+
 ensure_subid_range() {
   local file="$1"
   local option="$2"
@@ -135,3 +144,4 @@ echo "Socket: ${socket}"
 echo "The setup leaves /etc/filius/github-token root-only. Do not add ${RUNNER_USER} to the docker group."
 echo "Check the daemon with: sudo -u ${RUNNER_USER} DOCKER_HOST=unix://${socket} docker info"
 echo "The runner launcher mounts this rootless socket into the runner container."
+echo "Deployment projects can use the persistent directory: ${deployment_dir}"

@@ -87,13 +87,28 @@ runuser -u "${RUNNER_USER}" -- env \
   DOCKER_HOST="unix://${docker_socket}" \
   bash "${SCRIPT_DIR}/build-runner/build.sh"
 
+echo "Building the deployment runner image with ${RUNNER_USER}'s rootless Docker daemon..."
+runuser -u "${RUNNER_USER}" -- env \
+  HOME="${RUNNER_HOME}" \
+  USER="${RUNNER_USER}" \
+  LOGNAME="${RUNNER_USER}" \
+  DOCKER_HOST="unix://${docker_socket}" \
+  bash "${SCRIPT_DIR}/deployment-runner/build.sh"
+
 runuser -u "${RUNNER_USER}" -- env \
   HOME="${RUNNER_HOME}" \
   USER="${RUNNER_USER}" \
   LOGNAME="${RUNNER_USER}" \
   DOCKER_HOST="unix://${docker_socket}" \
   docker image inspect filius-builder:local >/dev/null
+runuser -u "${RUNNER_USER}" -- env \
+  HOME="${RUNNER_HOME}" \
+  USER="${RUNNER_USER}" \
+  LOGNAME="${RUNNER_USER}" \
+  DOCKER_HOST="unix://${docker_socket}" \
+  docker image inspect filius-deployer:local >/dev/null
 
 echo
-echo "Setup complete. The runner image is ready and the GitHub API check passed."
+echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
 echo "To wait for one job, run: sudo ${SCRIPT_DIR}/build-runner/run-once.sh ${github_url}"
+echo "For a deployment job, run: sudo ${SCRIPT_DIR}/deployment-runner/run-once.sh ${github_url}"

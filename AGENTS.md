@@ -2,7 +2,7 @@
 
 ## Project scope
 
-This repository contains the self-hosted GitHub Actions runner setup for finius. The current implementation covers a rootless Docker build daemon and a script that starts one ephemeral runner for one repository job. Deployment, registry publishing, and monitoring are not implemented yet; do not describe them as working features.
+This repository contains the self-hosted GitHub Actions runner setup for finius. It provides ephemeral build and deployment runners connected to the dedicated rootless Docker daemon. Registry publishing and monitoring are not implemented yet; do not describe them as working features.
 
 ## Architecture
 
@@ -10,11 +10,12 @@ This repository contains the self-hosted GitHub Actions runner setup for finius.
 - `build-runner/Dockerfile` builds the GitHub Actions runner image. The runner process uses UID 1001 inside the container.
 - `build-runner/runner-entrypoint.sh` registers an ephemeral runner and runs one job.
 - `build-runner/run-once.sh` reads the host PAT from `/etc/filius/github-token`, requests a short-lived registration token from GitHub, and launches the runner through the rootless Docker socket.
+- `deployment-runner/Dockerfile` extends the build runner image with Docker Compose and uses the `docker-deploy` label. Its launcher uses the shared one-job host script and mounts `/var/lib/filius-runner/deployments` at the same path into the runner container for daemon-visible Compose bind mounts.
 - `.github/workflows/build.yml` is a smoke test. It targets `self-hosted` and `docker-build` labels and builds a small Docker image.
 
 The GitHub PAT must stay outside the repository and runner container. The registration token is short-lived and should only be passed to the runner at startup. Do not add secrets to source files, image layers, command output, or committed environment files.
 
-The runner container receives access to the rootless Docker socket. Keep it pointed at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute `/var/run/docker.sock` without an explicit security review. If socket permissions must be relaxed for the container's UID/GID mapping, do so only while the host socket's parent runtime directory is verified private, and restore its original mode after the container exits. Rootless Docker reduces host privilege but is not VM isolation.
+The runner containers receive access to the rootless Docker socket. Keep it pointed at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute `/var/run/docker.sock` without an explicit security review. If socket permissions must be relaxed for the container's UID/GID mapping, do so only while the host socket's parent runtime directory is verified private, and restore its original mode after the container exits. Rootless Docker reduces host privilege but is not VM isolation.
 
 ## Editing guidance
 
