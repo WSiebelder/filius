@@ -95,14 +95,19 @@ if [[ ! -S "${runtime_dir}/bus" ]]; then
   exit 1
 fi
 
-runuser -u "${RUNNER_USER}" -- env \
-  HOME="${RUNNER_HOME}" \
-  USER="${RUNNER_USER}" \
-  LOGNAME="${RUNNER_USER}" \
-  XDG_RUNTIME_DIR="${runtime_dir}" \
-  DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
-  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  dockerd-rootless-setuptool.sh install --force
+rootless_service="${RUNNER_HOME}/.config/systemd/user/docker.service"
+if [[ -s "${rootless_service}" ]]; then
+  echo "Rootless Docker user service already configured; skipping setup tool."
+else
+  runuser -u "${RUNNER_USER}" -- env \
+    HOME="${RUNNER_HOME}" \
+    USER="${RUNNER_USER}" \
+    LOGNAME="${RUNNER_USER}" \
+    XDG_RUNTIME_DIR="${runtime_dir}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    dockerd-rootless-setuptool.sh install --force
+fi
 
 runuser -u "${RUNNER_USER}" -- env \
   HOME="${RUNNER_HOME}" \
