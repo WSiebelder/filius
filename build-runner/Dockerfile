@@ -24,7 +24,8 @@ RUN apt-get update \
     && /opt/actions-runner/bin/installdependencies.sh \
     && chown -R runner:runner /opt/actions-runner
 
-COPY --chmod=0755 runner-entrypoint.sh /usr/local/bin/runner-entrypoint
+COPY runner-entrypoint.sh /usr/local/bin/runner-entrypoint
+RUN chmod 0755 /usr/local/bin/runner-entrypoint
 
 ENV RUNNER_ALLOW_RUNASROOT=0 \
     RUNNER_VERSION=${RUNNER_VERSION} \
