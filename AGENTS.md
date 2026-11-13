@@ -6,7 +6,7 @@ This repository contains the self-hosted GitHub Actions runner setup for finius.
 
 ## Architecture
 
-- `rootless-docker/setup.sh` creates the locked `filius-runner` account and configures its rootless Docker daemon on Debian or Ubuntu with systemd.
+- `rootless-docker/setup.sh` creates the locked `filius-runner` account, delegates cgroup controllers to its systemd user manager, and configures its rootless Docker daemon on Debian or Ubuntu with systemd. `rootless-docker/delegate-cgroups.sh` owns that idempotent delegation drop-in.
 - `build-runner/Dockerfile` builds the GitHub Actions runner image. The runner process uses UID 1001 inside the container.
 - `build-runner/runner-entrypoint.sh` registers an ephemeral runner and runs one job.
 - `build-runner/run-once.sh` reads the host PAT from `/etc/filius/github-token`, requests a short-lived registration token from GitHub, and launches the runner through the rootless Docker socket.

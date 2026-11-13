@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly RUNNER_USER="${RUNNER_USER:-filius-runner}"
 readonly RUNNER_HOME="${RUNNER_HOME:-/var/lib/filius-runner}"
 
@@ -80,6 +81,7 @@ ensure_subid_range /etc/subuid --add-subuids
 ensure_subid_range /etc/subgid --add-subgids
 
 runner_uid="$(id -u "${RUNNER_USER}")"
+bash "${SCRIPT_DIR}/delegate-cgroups.sh"
 loginctl enable-linger "${RUNNER_USER}"
 systemctl start "user@${runner_uid}.service"
 
@@ -93,7 +95,6 @@ if [[ ! -S "${runtime_dir}/bus" ]]; then
   exit 1
 fi
 
-runner_group="$(id -gn "${RUNNER_USER}")"
 runuser -u "${RUNNER_USER}" -- env \
   HOME="${RUNNER_HOME}" \
   USER="${RUNNER_USER}" \
@@ -128,4 +129,4 @@ echo "Rootless Docker is ready for ${RUNNER_USER}."
 echo "Socket: ${socket}"
 echo "The setup leaves /etc/filius/github-token root-only. Do not add ${RUNNER_USER} to the docker group."
 echo "Check the daemon with: sudo -u ${RUNNER_USER} DOCKER_HOST=unix://${socket} docker info"
-echo "The runner launcher should use this socket and add its group ID to the runner container."
+echo "The runner launcher mounts this rootless socket into the runner container."

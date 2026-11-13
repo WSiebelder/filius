@@ -37,7 +37,7 @@ The PAT is saved outside the checkout with root-only permissions. The installer 
 
 The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
-The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, enables that user's daemon at boot, and leaves the host's existing Docker daemon running. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon.
+The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, delegates the CPU, cpuset, I/O, memory, and PID cgroup controllers to that user's systemd manager, enables the daemon at boot, and leaves the host's existing Docker daemon running. If the delegation drop-in changes, the setup restarts the `filius-runner` user manager and its rootless Docker daemon; run it only when no runner job is active. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon. Resource-controller warnings can remain if the host does not use unified cgroup v2 or lacks those controllers.
 
 ### Start one runner
 
@@ -67,6 +67,7 @@ The example workflow targets `runs-on: [self-hosted, docker-build]`. A workflow 
 
 ```text
 rootless-docker/setup.sh       Host account and rootless Docker setup
+rootless-docker/delegate-cgroups.sh  Idempotent systemd cgroup delegation
 build-runner/Dockerfile        GitHub Actions runner image
 build-runner/runner-entrypoint.sh  Runner registration and execution
 build-runner/build.sh          Build the runner image
