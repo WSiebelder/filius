@@ -20,6 +20,19 @@ id "${RUNNER_DOCKER_USER}" >/dev/null 2>&1 || { echo "Rootless Docker user not f
 runner_uid="$(id -u "${RUNNER_DOCKER_USER}")"
 readonly DOCKER_SOCKET="${DOCKER_SOCKET:-/run/user/${runner_uid}/docker.sock}"
 [[ -S "${DOCKER_SOCKET}" ]] || { echo "Rootless Docker socket not found: ${DOCKER_SOCKET}. Run rootless-docker/setup.sh first." >&2; exit 1; }
+socket_dir="$(dirname -- "${DOCKER_SOCKET}")"
+socket_dir_owner="$(stat -c '%u' "${socket_dir}")"
+socket_dir_mode="$(stat -c '%a' "${socket_dir}")"
+socket_owner="$(stat -c '%u' "${DOCKER_SOCKET}")"
+if [[ "${socket_dir_owner}" != "${runner_uid}" || "${socket_owner}" != "${runner_uid}" ]] || (( (8#${socket_dir_mode} & 077) != 0 )); then
+  echo "Refusing to relax socket permissions: ${socket_dir} must be owned by ${RUNNER_DOCKER_USER} and private to that user." >&2
+  exit 1
+fi
+original_socket_mode="$(stat -c '%a' "${DOCKER_SOCKET}")"
+restore_socket_permissions() {
+  chmod "${original_socket_mode}" "${DOCKER_SOCKET}" 2>/dev/null || true
+}
+trap restore_socket_permissions EXIT
 export DOCKER_HOST="unix://${DOCKER_SOCKET}"
 
 github_url="${1%/}"
@@ -38,6 +51,10 @@ fi
 unset GITHUB_PAT_FILE
 
 docker info >/dev/null
+# The socket stays under the runner user's private runtime directory on the
+# host. Make the socket itself accessible inside the container, where the
+# rootless UID/GID mapping differs from the host IDs.
+chmod 0666 "${DOCKER_SOCKET}"
 runner_name="filius-build-$(hostname -s)-$(date +%s)"
 api_url="https://api.github.com/repos/${owner}/${repo}/actions/runners/registration-token"
 
@@ -54,11 +71,8 @@ runner_token="$(jq -er '.token' <<<"${api_response}")"
 unset api_response
 echo "Starting ephemeral runner ${runner_name}; it will exit after one job completes."
 
-# In rootless Docker, container GID 0 maps to the daemon user's primary host
-# group. The socket's numeric host GID is not mapped into the container.
 docker run --rm \
   --name "${runner_name}" \
-  --group-add 0 \
   --volume "${DOCKER_SOCKET}:/var/run/docker.sock" \
   --env "GITHUB_URL=${github_url}" \
   --env "RUNNER_TOKEN=${runner_token}" \

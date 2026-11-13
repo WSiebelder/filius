@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   hello-world:
-    name: Hello world and Docker build
+    name: Runner and Docker smoke test
     runs-on: [self-hosted, docker-build]
     steps:
       - name: Say hello
@@ -19,6 +19,9 @@ jobs:
 
       - name: Check Docker connection
         run: docker version
+
+      - name: Inspect Docker daemon
+        run: docker info
 
       - name: Build a tiny test image
         env:
@@ -29,4 +32,8 @@ jobs:
           CMD ["echo", "Hello from a container built by the runner!"]
           DOCKERFILE
           docker image inspect "filius-runner-smoke:${IMAGE_TAG}" >/dev/null
-          echo "The runner built the test image successfully."
+
+      - name: Run the test image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: docker run --rm "filius-runner-smoke:${IMAGE_TAG}"

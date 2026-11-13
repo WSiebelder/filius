@@ -18,7 +18,7 @@ The runner currently has the labels `self-hosted`, `linux`, `x64`, and `docker-b
 - `curl` and `jq` on finius for the one-job launcher.
 - A private GitHub repository for the runner to serve. Only run trusted workflows on a self-hosted runner.
 
-The runner uses the rootless daemon socket rather than `/var/run/docker.sock`. This limits Docker control to the `filius-runner` account and its rootless daemon. It is not a VM: runner jobs still share finius's kernel and resources. Docker documents [rootless mode](https://docs.docker.com/engine/security/rootless/) and its [security model](https://docs.docker.com/engine/security/).
+The runner uses the rootless daemon socket rather than `/var/run/docker.sock`. Before mounting the socket into the runner container, `run-once.sh` temporarily makes the socket file accessible and restores its original mode after the container exits. The socket remains under systemd's private `/run/user/<UID>` directory on the host. This limits Docker control to the `filius-runner` account and its rootless daemon. It is not a VM: runner jobs still share finius's kernel and resources. Docker documents [rootless mode](https://docs.docker.com/engine/security/rootless/) and its [security model](https://docs.docker.com/engine/security/).
 
 ## Install on finius
 

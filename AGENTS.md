@@ -14,7 +14,7 @@ This repository contains the self-hosted GitHub Actions runner setup for finius.
 
 The GitHub PAT must stay outside the repository and runner container. The registration token is short-lived and should only be passed to the runner at startup. Do not add secrets to source files, image layers, command output, or committed environment files.
 
-The runner container receives access to the rootless Docker socket. Keep it pointed at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute `/var/run/docker.sock` without an explicit security review. Rootless Docker reduces host privilege but is not VM isolation.
+The runner container receives access to the rootless Docker socket. Keep it pointed at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute `/var/run/docker.sock` without an explicit security review. If socket permissions must be relaxed for the container's UID/GID mapping, do so only while the host socket's parent runtime directory is verified private, and restore its original mode after the container exits. Rootless Docker reduces host privilege but is not VM isolation.
 
 ## Editing guidance
 
