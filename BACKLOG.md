@@ -136,7 +136,8 @@ configuration schema and noninteractive input interface.
 
 **Evidence:** `build-runner/run-once.sh:40-70,93-107` adds shared socket state but
 uses second-based names; `build-runner/runner-entrypoint.sh:32` uses `--replace`.
-`runner-pool.sh:125-157` lacks a shared start/stop lock and partial-pool repair.
+`runner-pool.sh:1-54` is the legacy fixed foreground pool, without demand-driven
+lifecycle or idle expiry. Its separate detached dashboard rewrite was discarded.
 
 **Deliverable:** Use collision-resistant worker/runner/container identities,
 serialize pool transitions, repair missing enabled workers and handle
@@ -174,7 +175,7 @@ is complete.
 **Evidence:** `setup.sh:135-225`,
 `orchestration-runner/filius-orchestrator.service:1-21` and
 `orchestration-runner/run-once.sh:1-43` provide the orchestration foundation.
-`runner-pool.sh:7,83-146` still fixes legacy capacity and opens a dashboard.
+`runner-pool.sh:1-54` still implements only the fixed foreground legacy pool.
 
 **Deliverable:** Integrate systemd-managed supervision with setup. Keep one
 orchestration worker registered here continuously available, replacing its

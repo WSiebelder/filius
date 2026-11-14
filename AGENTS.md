@@ -1,33 +1,155 @@
 # Repository instructions
 
-## Project scope
+## Scope and implementation boundaries
 
-This repository contains the self-hosted GitHub Actions runner setup for finius. It provides ephemeral build and deployment runners connected to the dedicated rootless Docker daemon. Registry publishing and monitoring are not implemented yet; do not describe them as working features.
+This repository is the central configuration and orchestration repository for
+the finius self-hosted build/deployment server. The target host is headless,
+Ubuntu-based Linux Mint with systemd and Bash 4+. Applications and runners use
+the dedicated rootless Docker daemon on the same machine.
 
-## Architecture
+Distinguish implemented source from the approved target and verified host
+operation. `STATE.md` records implementation/history; `BACKLOG.md` defines
+remaining work and acceptance criteria.
 
-- `rootless-docker/setup.sh` creates the locked `filius-runner` account, delegates cgroup controllers to its systemd user manager, and configures its rootless Docker daemon on Debian or Ubuntu with systemd. `rootless-docker/delegate-cgroups.sh` owns that idempotent delegation drop-in.
-- `build-runner/Dockerfile` builds the GitHub Actions runner image. The runner process uses UID 1001 inside the container.
-- `build-runner/runner-entrypoint.sh` registers an ephemeral runner and runs one job.
-- `build-runner/run-once.sh` reads the host PAT from `/etc/filius/github-token`, requests a short-lived registration token from GitHub, and launches the runner through the rootless Docker socket.
-- `deployment-runner/Dockerfile` extends the build runner image with Docker Compose and uses the `docker-deploy` label. Its launcher uses the shared one-job host script and mounts `/var/lib/filius-runner/deployments` at the same path into the runner container for daemon-visible Compose bind mounts.
-- `.github/workflows/build.yml` is a smoke test. It targets `self-hosted` and `docker-build` labels and builds a small Docker image.
+Implemented now:
 
-The GitHub PAT must stay outside the repository and runner container. The registration token is short-lived and should only be passed to the runner at startup. Do not add secrets to source files, image layers, command output, or committed environment files.
+- Root `setup.sh` prepares rootless Docker, builds local runner images, and
+  installs/enables/starts `filius-orchestrator.service`.
+- The orchestration service maintains one worker registered to this repository
+  by launching fresh one-job ephemeral runners after jobs/exits and at boot.
+- `.github/workflows/dispatch_runner.yml` is manual-only (`workflow_dispatch`).
+  Its only job step is `echo HelloWorld`; it does not discover queues or launch
+  workload runners.
+- Orchestration uses `docker-orchestrate`, not `docker-build` or `docker-deploy`,
+  and its container has no Docker socket or deployment-directory mount.
+- `runner-pool.sh` remains a legacy foreground two-build/one-deploy pool for an
+  explicitly supplied repository URL. It is not started by setup. The detached
+  dashboard rewrite was discarded; do not assume start/status/stop commands,
+  persisted worker state, or eight-hour expiry are present.
 
-The runner containers receive access to the rootless Docker socket. Keep it pointed at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute `/var/run/docker.sock` without an explicit security review. If socket permissions must be relaxed for the container's UID/GID mapping, do so only while the host socket's parent runtime directory is verified private, and restore its original mode after the container exits. Rootless Docker reduces host privilege but is not VM isolation.
+Queue discovery, eligibility/capacity configuration, workload idle expiry,
+application release/deployment automation, registry publishing and monitoring
+are not implemented. Host boot recovery, registration and job execution have
+not been verified by local syntax checks.
 
-## Editing guidance
+## Approved target design
 
-- Keep host setup scripts safe to rerun and fail clearly when prerequisites are missing.
-- Preserve compatibility with the current Debian/Ubuntu systemd target unless the user asks to broaden it.
-- Keep one-job runner behavior ephemeral. A supervisor that repeats jobs must request a fresh runner registration token each time.
-- The runner image pins its runner version, checks for a newer stable release at startup, and uses `--disableupdate` for ephemeral operation. Update the pinned version and rebuild the image regularly so GitHub continues to accept jobs.
-- `.github/workflows/build-runner-image.yml` rebuilds the local runner image when its Dockerfile or build inputs change. It runs on the current runner, so the updated image is used by the next ephemeral runner launch.
-- Match workflow `runs-on` labels to the labels configured by the runner image.
-- Update `README.md` when setup steps, required permissions, supported platforms, or operational behavior changes.
-- Prefer small, explicit shell scripts with `#!/usr/bin/env bash` and `set -euo pipefail`.
+- Use repository-scoped registration for personal-account repositories. Do not
+  require an organization, migrate repositories or imply account-wide runner
+  registration exists. An account URL identifies configuration scope, not a
+  runner-registration endpoint.
+- Keep one always-available orchestration worker in this repository, exempt
+  from workload idle expiry. "Permanent" means supervised availability, not a
+  permanent non-ephemeral runner registration.
+- This repository's target list is an eligibility allowlist. Configured worker
+  counts are capacity limits, not instructions to start every configured worker.
+- Extend the manually triggered `dispatch_runner` workflow to query account
+  repositories for runnable queued jobs, intersect with the allowlist, and
+  start only missing matching capacity. Reuse idle/busy/starting workers and
+  prevent duplicate launches or capacity overruns across concurrent dispatches.
+- Inspect jobs, not just workflow-run status: active runs can contain queued
+  downstream jobs. Handle pagination and supported runner labels. Do not launch
+  for completed/cancelled jobs, blocked work, unsupported labels, ineligible
+  repositories, or repositories without runnable queued work. API errors are
+  not permission to launch.
+- Discovery occurs only on explicit dispatch. Do not add scheduled polling,
+  automatic job-triggered revival, or a continuously running queue scheduler
+  without a new design decision. Later-ready jobs require another dispatch
+  unless a matching enabled worker can accept them.
+- Workload workers expire after eight continuous idle hours. Job start cancels
+  the idle deadline; a fresh runner after completion gets a new idle period.
+  Never kill an active job because of this limit, including jobs longer than
+  eight hours. Expired workers remain disabled until dispatch finds eligible
+  work and revives them; setup/reboot/retry must not silently undo expiry.
+- Keep exactly one centrally registered deployment worker and execute
+  deployment workflows in this repository, globally serialized. Dispatch
+  starts it only when its central queue needs it. Application repositories
+  submit verified successful release information through an explicitly
+  authorized trigger. Calling a reusable workflow hosted here does not move
+  execution out of the caller repository.
+- Standardized reusable build workflows test proposed PR merge results before
+  merge and build/test `master` again after merge. Applications define their
+  Dockerfile/context, tests, image name/version and deployment settings.
+- Prefer updating the selected Compose service's image reference and applying
+  `docker compose up -d` on the same daemon. A plain restart does not apply a
+  changed image. Preserve unrelated services/data. Image transport, release
+  schema, submission authentication, settings, health checks and rollback
+  remain explicit backlog decisions.
 
-## Verification
+## Architecture and operational invariants
 
-Do not run tests or host setup commands unless the user asks for verification or execution. Before suggesting commands for finius, distinguish commands run as root from commands run as `filius-runner`, and state when a command can change host packages, accounts, or services.
+- `rootless-docker/setup.sh` manages the locked `filius-runner` account,
+  subordinate IDs, linger, private home and rootless Docker user service.
+  `rootless-docker/delegate-cgroups.sh` owns the idempotent delegation drop-in.
+  Changed delegation can restart the user manager/daemon and affect jobs/apps.
+- `build-runner/Dockerfile` builds `filius-builder:local`; jobs run as container
+  UID 1001. `build-runner/runner-entrypoint.sh` registers and runs one job.
+- `build-runner/run-once.sh` is the shared root-only host launcher for build,
+  deployment and orchestration. Request a fresh registration token each launch.
+- `orchestration-runner/run-once.sh` launches/stops the managed orchestration
+  container. Its systemd unit uses root-owned runtime files installed beneath
+  `/usr/local/lib/filius`, not mutable admin-owned checkout scripts.
+- `/etc/filius/orchestration.env` contains only repository and host path/user
+  settings, not token values. Unchanged setup reuses the service. Active runtime
+  changes require an explicit stop/reinstallation; do not silently interrupt
+  jobs or report deferred configuration as already active.
+- `deployment-runner/Dockerfile` extends the builder with Compose/rsync.
+  Deployment bind mounts must use `/var/lib/filius-runner/deployments` (or its
+  configured equivalent), mounted at the same path in container and daemon
+  host. The ephemeral checkout is not a persistent daemon-visible host path.
+- `compose.runners.yaml` separates orchestration/build/deployment roles.
+  Match workflow labels to these roles. Labels guide routing; they are not
+  security isolation against trusted workflows selecting default labels.
+- `.github/workflows/build.yml` is a Docker smoke test.
+  `.github/workflows/build-runner-image.yml` rebuilds both local images using an
+  already available build runner. Neither runs on orchestration; the rebuild
+  workflow does not install host runtime changes or discover new runner releases.
+- Runner versions remain pinned; startup warns about newer stable releases and
+  ephemeral registration uses `--disableupdate`. Latest-stable setup/update
+  resolution is future work, not an implemented feature.
+
+## Credentials, privileges and isolation
+
+Keep the host PAT outside the checkout, images and runner containers, normally
+at `/etc/filius/github-token` with root-only permissions. Pass only a fresh
+short-lived registration token at runner startup. Never put secrets in source,
+image layers, logs, committed environment files or service configuration.
+
+Host registration currently requires repository Administration read/write for
+a fine-grained PAT; future queue discovery also needs Actions read permission
+for selected repositories. GitHub account changes, registration, workflow
+dispatch and credential/permission changes require explicit user authorization.
+
+Only build/deployment jobs receive the rootless socket. Keep the host endpoint
+at `/run/user/<filius-runner-uid>/docker.sock`; do not substitute the host's
+`/var/run/docker.sock` without an explicit security review. The conventional
+`/var/run/docker.sock` container mount target still refers to that rootless
+source. Relax socket mode only after verifying its host parent runtime directory
+is private and owned by the runner account. Coordinate concurrent consumers
+and restore the original mode after the last exits; crash/socket-replacement
+recovery remains unfinished.
+
+Rootless Docker and ephemeral jobs are not VM isolation. Build/deployment jobs
+control the same daemon as applications. Run trusted workflows only. Keep
+future host discovery/launch control authenticated and constrained by installed
+configuration; do not expose the PAT or arbitrary root execution to jobs.
+
+## Editing and verification
+
+- Keep root `setup.sh` the idempotent entry point that contains or orchestrates
+  required host setup for future reference. Fail clearly on missing or
+  incompatible prerequisites; preserve the current Ubuntu/Debian systemd target.
+- Prefer small explicit scripts with `#!/usr/bin/env bash` and `set -euo pipefail`.
+  Keep one-job behavior ephemeral and supervised retries bounded/backed off.
+- Update README when installation, permissions, platforms or operations change.
+  Keep STATE/BACKLOG consistent without presenting target work as implemented.
+- Preserve unrelated worktree changes. Do not resurrect the discarded dashboard
+  pool as the target design. Do not commit or push without a user request.
+- Do not run tests, host setup, builds, containers, services or GitHub write operations
+  unless the user authorizes the corresponding verification/execution scope.
+  Authorization for local syntax/lint checks does not authorize host execution.
+- Use available existing check tools. Do not treat macOS Bash 3.2 parsing as
+  proof of Bash 4+ host behavior, or service active state as proof of online
+  GitHub registration. State unavailable checks and unverified behavior plainly.
+- Before suggesting host commands, distinguish root from `filius-runner` and
+  identify effects on packages, accounts, services, jobs and applications.

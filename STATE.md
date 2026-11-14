@@ -5,8 +5,9 @@
 The original assessment inspected HEAD `4679a0a` (`fix setup user group syntax`)
 and four staged source changes. Documentation was subsequently committed at
 `bff793e` (`Add state and backlog md`), and those four source changes were
-unstaged. The current worktree adds the first orchestration implementation
-while preserving that earlier unfinished work.
+unstaged. The orchestration slice was committed at `f6d79c4`, integrating the
+shared launcher changes. The remaining detached pool/dashboard rewrite and
+matching README changes were subsequently discarded at the user's request.
 
 This describes source, not verified server operation. No tests, Docker builds,
 host setup, service startup or GitHub configuration/registration were executed.
@@ -95,7 +96,7 @@ root/admin: separately/manually start legacy runner-pool.sh
 deployment job -> persistent Compose project -> same rootless daemon
 ```
 
-The legacy pool can run detached from its dashboard, but has no boot service or
+The legacy pool runs in the foreground, with no dashboard, boot service or
 idle expiry. The rootless Docker daemon and new orchestration service are
 boot-enabled; setup does not start the legacy build/deployment pool.
 
@@ -119,7 +120,7 @@ References below describe current worktree source, including uncommitted changes
 | `compose.runners.yaml:1-34` | Adds socket-free orchestration to the existing build/deploy definitions; deploy runners also mount the persistent deployment directory. |
 | `orchestration-runner/run-once.sh:1-43` | Root host service launcher and bounded stop of only the known, Compose-labeled orchestration container. |
 | `orchestration-runner/filius-orchestrator.service:1-21` | Boot-enabled service with restart delay, fresh one-job launches and targeted pre-start/stop cleanup. |
-| `runner-pool.sh:5-7,25-193` | Unstaged legacy supervisor: fixed two-build/one-deploy list, retries, detached workers, PID checks, dashboard and start/status/stop. Unchanged by orchestration implementation. |
+| `runner-pool.sh:1-54` | Legacy foreground two-build/one-deploy loops for an explicit repository URL; no dashboard or start/status/stop interface. |
 | `.github/workflows/dispatch_runner.yml:1-13` | Manual-only orchestration placeholder printing `HelloWorld`. |
 | `.github/workflows/build.yml:3-39` | Push/manual Docker smoke test using `self-hosted` and `docker-build`; no PR trigger or application release pipeline. |
 | `.github/workflows/build-runner-image.yml:3-34` | Push-on-input-change/manual rebuild of both local images using an already available build runner. Not automatic runner-release discovery or pool bootstrap. |
@@ -142,31 +143,34 @@ References below describe current worktree source, including uncommitted changes
 | Job labels | Custom roles: `docker-orchestrate`, `docker-build`, `docker-deploy`; all have default `self-hosted,linux,x64` platform labels. |
 | Job workspace | `/home/runner/_work`, inside the removable runner; not a durable daemon-visible application bind-mount path. |
 | Deployment projects | `/var/lib/filius-runner/deployments`, mounted at the same path in deploy runners. Setup leaves this directory mode 0777 behind the private parent, to accommodate container UID mapping. |
-| Pool state/logs | `/var/lib/filius-runner/pool`, root-only directory containing worker PID/state/log files in the staged implementation. |
+| Legacy pool output | Terminal output only; persisted PID/state/log files belonged to the discarded dashboard rewrite. |
 
 Source: `setup.sh:5-8,34-82`; `rootless-docker/setup.sh:23-44`;
 `setup.sh:135-225`; `build-runner/Dockerfile:22-39`;
 `build-runner/run-once.sh:6-14,26-70,107-135`;
-`compose.runners.yaml:1-34`; `runner-pool.sh:5-7,25-27,114-146`.
+`compose.runners.yaml:1-34`; `runner-pool.sh:1-54`.
 
 Deployment containers and named volumes can outlive a runner container in the
 rootless daemon. They are not shown to be deployed by this repository.
 Rootless port binding and host networking/exposure still need application-level
 decisions.
 
-## Pending worktree changes
+## Implementation history
+
+The table records the orchestration implementation review before commit.
+Orchestration was then committed; the unrelated pool rewrite was discarded.
 
 | File | Committed baseline | Pending worktree behavior |
 | --- | --- | --- |
-| `runner-pool.sh` | Foreground loops for two build workers and one deployment worker, explicit repository URL, parent/child shutdown handling. | Detached `setsid` workers; saved URL default; PID identity checks; persisted worker state/logs; numbered dashboard; `start`, `status`, `stop`. Leaving with `q` leaves workers running; Ctrl-C during log following returns to the dashboard. |
+| `runner-pool.sh` | Foreground loops for two build workers and one deployment worker, explicit repository URL, parent/child shutdown handling. | Proposed detached workers/dashboard were not committed and have been discarded; the foreground implementation remains. |
 | `build-runner/run-once.sh` | Each launcher saves/restores socket mode independently. | Preserves prior shared socket coordination and adds an orchestration role that skips relaxation, selects its service and accepts a service-specific name. |
 | `setup.sh` | Prints foreground pool-start instructions; starts no runners. | Builds existing images, installs/enables/starts orchestration; does not start the legacy workload pool. |
-| `README.md` | Describes foreground pool/Ctrl-C shutdown. | Retains pending detached-pool instructions, separates them from automatic orchestration, and documents HelloWorld and installed-runtime operations. |
+| `README.md` | Describes foreground pool/Ctrl-C shutdown. | Documents automatic orchestration/HelloWorld and the separate foreground legacy pool. Dashboard instructions were excluded from the commit and discarded afterward. |
 | New orchestration runtime, Compose service and dispatch workflow | No orchestration role/service/workflow. | Root-owned service installation, socket-free ephemeral orchestration and manual HelloWorld placeholder. |
 
-These source changes remain uncommitted and unverified on the server.
-Orchestration integrates the prior changes where required; `runner-pool.sh`
-is preserved unchanged. This is not a completed implementation of the full backlog.
+The orchestration source is committed but unverified on the server. Restoring
+the legacy pool removed only its uncommitted rewrite, not orchestration or
+shared socket coordination. This is not a completed implementation of the full backlog.
 
 ## Gaps and operational caveats
 
@@ -191,14 +195,13 @@ is preserved unchanged. This is not a completed implementation of the full backl
   a working runner and an input change/manual dispatch. See B05.
 - **Concurrency concerns from inspection:** same-kind workers can produce the
   same hostname/second-based name (`build-runner/run-once.sh:107`) while runner
-  registration uses `--replace` (`build-runner/runner-entrypoint.sh:32`). Starting an
-  incomplete pool returns when any worker is alive, rather than repairing it;
-  pool start/stop has no shared transition lock (`runner-pool.sh:125-157`).
-  These are not reproduced failures. See B03.
+  registration uses `--replace` (`build-runner/runner-entrypoint.sh:32`). The
+  legacy pool has no demand-based capacity management or idle-expiry state.
+  These are inspection concerns, not reproduced failures. See B03.
 - **Recovery boundaries:** socket reference-count correctness after forced
   termination or socket replacement, runner-container cleanup on cancellation,
-  and stop completion are unverified. State/PID/log files and a dashboard are
-  not implemented monitoring. See B03, B09-B10.
+  and stop completion are unverified. Service journals are available, but
+  monitoring is not implemented. See B03, B09-B10.
 - **Shared privilege and resources:** build/deploy jobs control the same rootless
   daemon; orchestration has no socket. Labels do not isolate builds from deployed applications; ephemeral
   runners do not make untrusted jobs safe. Keep workflow code trusted, the PAT

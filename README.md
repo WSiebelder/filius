@@ -79,7 +79,7 @@ If build/deployment jobs are needed before on-demand orchestration is implemente
 sudo /opt/filius/runner-pool.sh https://github.com/OWNER/REPOSITORY
 ```
 
-This foreground host script keeps two build workers and one deployment worker available indefinitely, not only when work is pending; it has no eight-hour idle expiry or boot-enabled service. Pass the repository URL explicitly. Each worker requests a fresh registration token for every job. Press Ctrl-C to stop the pool; logs appear in its terminal output. The detached dashboard and start/status/stop commands belong to a separate, uncommitted pool rewrite.
+This foreground host script keeps two build workers and one deployment worker available indefinitely, not only when work is pending; it has no eight-hour idle expiry or boot-enabled service. Pass the repository URL explicitly. Each worker requests a fresh registration token for every job. Press Ctrl-C to stop the pool; logs appear in its terminal output.
 
 The example workflow targets `runs-on: [self-hosted, docker-build]`. A workflow with different labels will remain queued until a matching runner is available. See [GitHub's runner selection docs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
 
