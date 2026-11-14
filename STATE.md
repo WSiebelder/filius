@@ -2,10 +2,12 @@
 
 ## Snapshot and verification boundary
 
-Baseline for this slice is `b943a5d` (`update the design parameters`). The
-worktree now implements this repository as the first eligible, demand-driven
-build target. These changes are intentionally uncommitted: the user will
-commit/push and install the runtime on the server.
+The first eligible, demand-driven build slice was committed at `999e879`
+(`implement run start`), building on `b943a5d`. A reported dispatch failure
+occurred before request submission because the container lacked its control
+directories, consistent with an older installed host runtime. The current
+uncommitted follow-up adds a clear missing-mount preflight and focused tests;
+server installation/repair has not been performed from this local session.
 
 This describes source, not verified server operation. Local standard-library
 mocked tests cover discovery, request isolation, singleton activation, restart
@@ -113,7 +115,7 @@ normal consumer exits. Forced termination/socket replacement recovery remains
 unfinished. Cgroup-delegation changes during setup can restart the user manager
 and daemon, affecting jobs/apps.
 
-## Pending worktree changes
+## First-repository implementation files
 
 | Files | Change |
 | --- | --- |
@@ -121,8 +123,8 @@ and daemon, affecting jobs/apps.
 | `host-control/controller.py`, `host-control/*.service`, `host-control/*.path`, `host-control/drain.sh` | Constrained request processing, GitHub discovery, persisted build supervision/expiry and operator drain. |
 | `setup.sh` | Python prerequisite, eligibility/Actions checks, root-owned runtime/control installation, active-update guards, path/orchestration enablement and workload boot recovery. |
 | `compose.runners.yaml` | Narrow writable request and read-only result mounts for orchestration; existing build/deploy socket/mount behavior retained. |
-| `.github/workflows/dispatch_runner.yml` | Replaces HelloWorld with manual request/bounded result reporting; no push/schedule trigger or extra token permissions. |
-| `tests/test_host_control.py` | Focused mocked tests; no live API/Docker/systemd access. |
+| `.github/workflows/dispatch_runner.yml` | Manual request/bounded result reporting and an early missing-mount diagnostic; no push/schedule trigger or extra token permissions. |
+| `tests/test_host_control.py` | Focused mocked tests, including missing/present control directory preflight; no live API/Docker/systemd access. |
 | `README.md`, `STATE.md`, `BACKLOG.md`, `AGENTS.md` | Current implementation, installation sequence, safety constraints and remaining scope. |
 
 `runner-pool.sh`, the two build workflows, runner images/entrypoint and shared

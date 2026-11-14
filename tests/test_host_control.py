@@ -3,7 +3,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
@@ -14,6 +16,43 @@ SPEC = importlib.util.spec_from_file_location(
 )
 control = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(control)
+
+
+class DispatchMountTests(unittest.TestCase):
+    def script(self, root):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/dispatch_runner.yml"
+        script = textwrap.dedent(workflow.read_text().split("        run: |\n", 1)[1])
+        return script.replace("/filius-control", str(root))
+
+    def test_missing_either_control_directory_fails_before_request_submission(self):
+        for directories in ((), ("requests",), ("results",)):
+            with self.subTest(directories=directories), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for directory in directories:
+                    (root / directory).mkdir()
+                environment = dict(os.environ, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+                result = subprocess.run(
+                    ["/bin/bash", "-c", self.script(root)],
+                    env=environment, capture_output=True, text=True, timeout=5,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("::error::Host control mount directories are missing", result.stdout)
+                self.assertIn("setup.sh", result.stdout)
+                self.assertFalse((root / "requests/123-1.request").exists())
+                for directory in ("requests", "results"):
+                    self.assertEqual((root / directory).exists(), directory in directories)
+
+    def test_control_directories_allow_preflight_to_continue(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "requests").mkdir()
+            (root / "results").mkdir()
+            preflight = self.script(root).split("export REQUEST_ID=", 1)[0]
+            result = subprocess.run(
+                ["/bin/bash", "-c", preflight],
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class DiscoveryTests(unittest.TestCase):
