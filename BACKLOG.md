@@ -3,9 +3,10 @@
 ## Scope and priorities
 
 `STATE.md` records source implementation and pending worktree changes. The
-current slice adds boot-persistent orchestration and a manual HelloWorld
-placeholder. Queue discovery, workload launch/expiry and application delivery
-remain future work; source implementation is not verified server operation.
+current slice adds demand-driven discovery and one expiring build worker for
+`WSiebelder/filius`, behind permanent orchestration and constrained host requests.
+Multi-repository scheduling and application delivery remain future work;
+source/mock verification is not verified server operation.
 
 The destination is an idempotent `setup.sh` for a headless Ubuntu-based Linux
 Mint host, manually requested queue discovery, repository-scoped build runners,
@@ -16,7 +17,8 @@ Do not alter GitHub account configuration without explicit consent.
 P0 establishes bootstrap, supervision and manual orchestration. P1 delivers
 current runner maintenance and application delivery. P2 completes operational
 hardening and verification tooling. Acceptance criteria are future checks; no
-tests or host setup were executed for this documentation task.
+real host setup or GitHub/Docker operations were executed. Focused local mocked
+tests and syntax checks are authorized for the first-repository implementation.
 
 ## Locked target architecture
 
@@ -71,17 +73,20 @@ continuously running scheduler is required.
   build/deployment workers are activated by explicit dispatch when work exists.
   Re-running setup must not silently re-enable expired workers.
 
-The mechanism for authenticated host control, release submission and the
-deployment settings contract remains to be implemented. These details do not
-reopen the above target choices.
+The first-repository host control uses narrow request/result mounts and root-owned
+Python/systemd logic. General capacity configuration, release submission and
+deployment settings remain future work; these do not reopen the target choices.
 
 ## B01 - Configure repository-scoped runners and central roles
 
 **Priority:** P0. **Dependencies:** none.
 
-**Evidence:** `setup.sh:56-65` and `build-runner/run-once.sh:75-108` require a
-repository URL and repository registration endpoint. The current pool targets
-one repository and cannot yet distinguish orchestration from ordinary builds.
+**Status:** Partial: `eligible-repositories.json` plus installed validation
+supports only `WSiebelder/filius`, with one managed build worker. Roles are
+separate, and setup requires Administration read/write plus Actions read.
+
+**Evidence:** `setup.sh`, `host-control/controller.py` and
+`compose.runners.yaml` preserve repository registration and distinct roles.
 
 **Deliverable:** Define central configuration for this control repository,
 eligible build repositories, per-repository worker capacity limits and
@@ -100,9 +105,10 @@ Invalid targets/counts, missing repository access and inadequate
 credentials fail clearly without exposing tokens. Personal-account repositories
 work without organization creation, migration or organization registration.
 
-**Open:** Configuration format, worker-count defaults, credential mechanism and
-selected repository permissions. Account discovery cannot automatically enroll
-repositories outside the configured eligibility list.
+**Open:** General multi-repository/count/deployment configuration and credential
+selection. The initial JSON schema deliberately rejects additional targets/
+settings; adding an entry does not enable future functionality by itself.
+Account discovery cannot automatically enroll ineligible repositories.
 See [GitHub runner scopes](https://docs.github.com/en/actions/concepts/runners/self-hosted-runners).
 
 ## B02 - Complete safe, repeatable Linux Mint bootstrap
@@ -134,6 +140,12 @@ configuration schema and noninteractive input interface.
 
 **Priority:** P0. **Dependencies:** none.
 
+**Status:** Partial: the managed first-repo build worker uses UUID identities,
+serialized transitions, persisted enabled/deadline state, listener/API job
+observations and safety-first label quarantine. Restart adopts a live managed
+container. Operator drain waits for busy work. Mocks cover these transitions;
+real assignment/drain guarantees and full crash recovery are not established.
+
 **Evidence:** `build-runner/run-once.sh:40-70,93-107` adds shared socket state but
 uses second-based names; `build-runner/runner-entrypoint.sh:32` uses `--replace`.
 `runner-pool.sh:1-54` is the legacy fixed foreground pool, without demand-driven
@@ -159,20 +171,24 @@ idle period. Expiry removes the idle registration/container and does not stop
 application containers. Failed registration, forced termination and daemon/socket
 replacement have safe, documented recovery.
 
-**Open:** Explicit operator stop/drain semantics, shutdown bounds, stale GitHub
-registration reconciliation and retry/backoff policy. Idle expiry is fixed at
-eight hours; ordinary failure recovery must not reset an existing idle deadline.
+**Open:** Live validation of assignment races, orphan launchers across failure/
+reboot, stale GitHub registration reconciliation, socket reference-count repair
+after forced termination/socket replacement, and generalized worker recovery.
+The current 60-second quarantine/observation gate is not a documented atomic
+GitHub drain. API uncertainty must defer cleanup. Idle expiry is eight hours;
+ordinary idle failure recovery must not reset its persisted deadline.
 
 ## B04 - Integrate headless boot-persistent supervision
 
 **Priority:** P0. **Dependencies:** B01, B02, B03.
 
-**Status:** Partial source implementation: setup installs/enables/starts one
-orchestration service; systemd cycles ephemeral jobs with fresh tokens. No
-workload supervision/expiry, multi-repository configuration or host acceptance
-is complete.
+**Status:** Partial source implementation: setup installs/enables/starts
+orchestration and request handling; systemd cycles ephemeral jobs with fresh
+tokens. One demand-enabled build service persists lifecycle/expiry state and
+does not revive never-enabled/expired workers. Multi-repository/deployment
+supervision and live host acceptance remain incomplete.
 
-**Evidence:** `setup.sh:135-225`,
+**Evidence:** `setup.sh`, the host-control units,
 `orchestration-runner/filius-orchestrator.service:1-21` and
 `orchestration-runner/run-once.sh:1-43` provide the orchestration foundation.
 `runner-pool.sh:1-54` still implements only the fixed foreground legacy pool.
@@ -200,13 +216,16 @@ configuration-change/drain policy and dashboard retention.
 
 **Priority:** P0. **Dependencies:** B01, B03, B04.
 
-**Status:** Dispatch placeholder only: `.github/workflows/dispatch_runner.yml`
-targets `docker-orchestrate` and prints `HelloWorld`. It does not query GitHub,
-apply the eligibility list or launch workload workers.
+**Status:** First-repository source implementation: manual dispatch requests a
+host-only scan of `WSiebelder/filius`, reports no-op/enable/reuse/failure, and
+starts/reuses one build worker only for matching demand. Pagination, current
+attempts, queued jobs in active runs, repeated dispatch and API errors have
+mocked coverage. General multi-repository and central deployment discovery
+remain open; target-host pickup is unverified.
 
-**Evidence:** The HelloWorld container has no Docker socket or deployment mount
-(`compose.runners.yaml:2-8`). An authenticated, constrained host operation for
-queue discovery/launch remains to be designed.
+**Evidence:** `dispatch_runner.yml`, `host-control/controller.py`, the dispatch
+path/service and narrow Compose mounts implement the identifier-only transport.
+PAT, Docker socket, host scripts and deployments stay outside orchestration.
 
 **Deliverable:** Extend the `dispatch_runner` workflow in this repository, triggered
 by `workflow_dispatch` on the dedicated orchestration label. Invoke an
@@ -239,11 +258,14 @@ failures. The workflow exits while host supervision keeps launched workers
 running independently. No periodic polling or automatic job-driven scan is
 installed.
 
-**Open:** Minimal host-control transport/authentication and configuration
-installation/update mechanism and API retry policy. A scan need not extend an
-already healthy worker's idle deadline. There is no background or post-job scan
-of other repositories; new demand without matching live capacity needs another
-manual dispatch.
+**Open:** General configuration/capacity, per-repository failure reporting and
+central deployment queues. Confirm actual approval/dependency readiness
+semantics against GitHub API observations on the host; the initial filter uses
+queued job status and resolved supported labels, excluding waiting runs and
+unresolved labels. Define retries and broader request/result retention.
+A scan does not extend an already healthy idle budget; explicit demand can
+renew an overdue/quarantined listener. No background/post-job account queue
+scan is installed; new demand without live matching capacity needs dispatch.
 
 ## B05 - Build and maintain the latest stable runner safely
 
@@ -372,15 +394,21 @@ live data. Operators can distinguish idle, busy, retrying and unhealthy
 workers, receive useful failure signals, and recover from documented outages.
 
 **Open:** Budgets, alert destination, trusted repository policy, retention
-thresholds and acceptable contention on the shared daemon.
+thresholds (including dispatch results and rejected request directories), and
+acceptable contention on the shared daemon.
 
 ## B10 - Add focused checks and authorized host acceptance
 
 **Priority:** P2. **Dependencies:** none for adding checks; full host acceptance
 depends on the applicable B01-B09 and B11 implementation.
 
-**Evidence:** No automated test suite/lint configuration was found among
-tracked files. Server behavior has not been verified for this assessment.
+**Status:** Focused `tests/test_host_control.py` standard-library mocked tests
+cover the first-repo slice. Local shell, YAML, embedded workflow syntax and
+whitespace checks are available; ShellCheck/actionlint/newer Bash were unavailable.
+No real host/GitHub/Docker operations are authorized/performed in this slice.
+
+**Evidence:** Server behavior is unverified; mocked local behavior is not host
+acceptance or proof of an atomic runner drain.
 
 **Deliverable:** Add focused shell/lifecycle/workflow checks alongside changed
 behavior. Document an explicitly authorized Mint-host acceptance procedure,
@@ -398,5 +426,7 @@ deployment routing/global serialization, PR merge-result/master CI, runner
 update, exact-image deployment and agreed rollback behavior. Record what was
 actually verified; do not substitute syntax checks for host lifecycle evidence.
 
-**Open:** Test harness and dedicated test-host availability. No commands should
-be executed merely because they appear in the runbook.
+**Open:** Dedicated host acceptance, real near-deadline job/assignment races,
+boot/upgrade/socket recovery and workflow pickup; broaden tests only with the
+corresponding new behavior. No commands should execute merely because they
+appear in the runbook.

@@ -1,0 +1,5 @@
+{
+  "build_repositories": [
+    "https://github.com/WSiebelder/filius"
+  ]
+}

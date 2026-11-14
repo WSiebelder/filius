@@ -1,0 +1,14 @@
+[Unit]
+Description=Filius host-only eligible build queue scan
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/filius/orchestration.env
+ExecStart=/usr/bin/python3 /usr/local/lib/filius/host-control/controller.py scan
+UMask=0077
+TimeoutStartSec=5min

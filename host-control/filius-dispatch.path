@@ -1,0 +1,9 @@
+[Unit]
+Description=Filius manual runner scan requests
+
+[Path]
+DirectoryNotEmpty=/var/lib/filius-control/requests
+Unit=filius-dispatch.service
+
+[Install]
+WantedBy=multi-user.target

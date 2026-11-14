@@ -1,0 +1,20 @@
+[Unit]
+Description=Filius demand-enabled ephemeral build worker
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/filius/orchestration.env
+ExecStart=/usr/bin/python3 /usr/local/lib/filius/host-control/controller.py worker
+Restart=on-failure
+RestartSec=30
+# Leave the shared launcher and its container alone on supervisor stop/restart.
+KillMode=process
+TimeoutStopSec=240
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

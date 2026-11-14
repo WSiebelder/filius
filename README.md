@@ -1,16 +1,19 @@
 # filius
 
-Self-hosted GitHub Actions runner tools for finius. Setup builds the build/deployment runner images and starts one systemd-supervised orchestration worker for this repository. All runner containers are launched on finius's dedicated rootless Docker daemon; only build/deployment jobs receive its socket. Registry publishing, queue discovery and monitoring are future work.
+Self-hosted GitHub Actions runner tools for finius. Setup builds local images and starts permanent orchestration. Manual dispatch discovers pending build work for `WSiebelder/filius` and starts/reuses one ephemeral-cycling build worker. All runners use finius's dedicated rootless Docker daemon; only build/deployment jobs receive its socket. Multi-repository scheduling, automated deployment, registry publishing and monitoring remain future work.
 
 ## How it works
 
 1. `rootless-docker/setup.sh` creates the locked `filius-runner` Linux account, its private home, and the persistent deployment directory, then configures a rootless Docker daemon for it.
 2. `build-runner/build.sh` builds `filius-builder:local`; `deployment-runner/build.sh` adds Docker Compose and builds `filius-deployer:local` on the same daemon.
 3. `setup.sh` installs a root-owned orchestration runtime and enables/starts `filius-orchestrator.service`. Each service cycle uses the host-only PAT to request a fresh, short-lived registration token, then starts one ephemeral orchestration runner. The service repeats after each job or failure and starts at boot.
-4. Each runner waits for one matching job, executes it, deregisters, and exits. Compose removes its container afterward. The orchestration container receives neither a Docker socket nor the deployment directory.
-5. The separate manual `runner-pool.sh` starts two build workers and one deployment worker. Setup does not start this legacy pool. Containers started by a deployment job remain running in the rootless daemon.
+4. Manual `dispatch_runner` writes an empty run/attempt-specific request. A systemd path/oneshot host service uses the host-only PAT to inspect queued jobs in queued and active runs. Only installed eligible targets and supported build labels qualify; no work is a successful no-op.
+5. Matching work enables one managed build worker. It requests a fresh registration token per ephemeral runner and cycles after each job. Eight continuous idle hours trigger safety-gated retirement; busy/uncertain runners are left alone. Orchestration never expires.
+6. The separate legacy `runner-pool.sh` starts two build workers and one deployment worker. Setup does not start it; do not run it alongside the managed build worker if you want a one-worker limit. Applications started by deployment jobs outlive the runner.
 
-The orchestration runner has labels `self-hosted`, `linux`, `x64`, and `docker-orchestrate`, without `docker-build` or `docker-deploy`. The build runner uses `docker-build`; the deployment runner uses `docker-deploy`, with the same default platform labels. `.github/workflows/dispatch_runner.yml` manually prints `HelloWorld` on orchestration. The existing Docker smoke-test and runner-image rebuild workflows still require a separately started build runner; orchestration does not execute them.
+The orchestration runner has labels `self-hosted`, `linux`, `x64`, and `docker-orchestrate`, without `docker-build` or `docker-deploy`. Build/deployment runners use their corresponding labels with the same platform labels. The existing Docker smoke-test and runner-image rebuild workflows execute sequentially on the separate build worker, not orchestration.
+
+`eligible-repositories.json` is an allowlist, not a startup list. This slice accepts only `https://github.com/WSiebelder/filius`, with capacity fixed at one. Other entries, duplicates, extra settings and a different control URL are rejected. Additional repositories/counts and central deployment dispatch remain backlog work.
 
 `.github/workflows/build-runner-image.yml` rebuilds both images when their build inputs change; updated images are used by subsequent runner launches. It does not update the root-owned host runtime installed by setup.
 
@@ -19,7 +22,7 @@ The orchestration runner has labels `self-hosted`, `linux`, `x64`, and `docker-o
 - A Debian or Ubuntu server using systemd, with Docker Engine installed.
 - Bash 4 or newer on the host (standard on supported Ubuntu/Debian releases).
 - The rootless Docker setup tool that matches the installed Docker Engine. The setup script installs common prerequisites and attempts to install `docker-ce-rootless-extras` if the tool is missing.
-- `curl`, `jq` and `timeout` on finius; the manual build/deployment launchers also require `flock`.
+- `curl`, `jq`, Python 3.8+, `timeout` and `flock` on finius. Setup installs missing curl/jq/Python; Python host logic uses only the standard library.
 - A private GitHub repository for the runner to serve. Only run trusted workflows on a self-hosted runner.
 
 Host launchers use the rootless daemon socket rather than the host's `/var/run/docker.sock`. Before mounting it into a build/deployment container, `run-once.sh` coordinates temporary socket accessibility and restoration across active consumers. Orchestration does not mount it or relax its mode. The socket remains under systemd's private `/run/user/<UID>` directory on the host. Rootless Docker is not a VM: jobs share finius's kernel and resources. Runner labels guide job selection, not isolation from trusted workflows intentionally using default self-hosted labels. Docker documents [rootless mode](https://docs.docker.com/engine/security/rootless/) and its [security model](https://docs.docker.com/engine/security/).
@@ -37,19 +40,19 @@ cd /opt/filius
 sudo ./setup.sh
 ```
 
-The installer checks for `curl` and `jq`, then prompts for a fine-grained PAT if `/etc/filius/github-token` does not exist yet. Create a PAT for the repository that will use the runner, with **Repository permissions → Administration: Read and write**. The account creating the token must be an administrator of that repository. GitHub requires this permission for the API that creates runner registration tokens; those temporary registration tokens expire after one hour. See [GitHub's self-hosted runner API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository).
+The installer checks prerequisites, then prompts for a fine-grained PAT if `/etc/filius/github-token` does not exist yet. Select `WSiebelder/filius` and grant **Repository permissions → Administration: Read and write** (registration/label management) and **Actions: Read** (run/job discovery). Existing PATs need the additional Actions permission. The token owner must administer the repository. Temporary runner registration tokens expire after one hour. See [GitHub's self-hosted runner API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository).
 
-Select this control repository's URL, such as `https://github.com/WSiebelder/filius`, not an account/organization URL. It is saved in `/etc/filius/repository-url`. On later setup runs, it appears as the prompt default; press Enter to keep it or enter a different control repository URL.
+Select `https://github.com/WSiebelder/filius`, not an account/organization URL. It is saved in `/etc/filius/repository-url` and offered on reruns. This first-use-case implementation rejects other control repositories.
 
-The PAT stays outside the checkout with root-only permissions. Setup checks GitHub access, prepares rootless Docker, builds `filius-builder:local` and `filius-deployer:local`, installs the orchestration service, and enables/starts it. It does not dispatch a workflow or start workload runners.
+The PAT stays outside the checkout with root-only permissions. Setup checks registration and Actions access, prepares rootless Docker, builds both images, installs the runtime and enables/starts orchestration and the request path. It enables build supervision for boot recovery but does not start a build worker itself. Never-enabled/expired workers stay disabled; previously enabled workers retain state on reboot.
 
-The service executes root-owned copies of its launcher and Compose configuration under `/usr/local/lib/filius`, not scripts from the admin-owned checkout. `/etc/filius/orchestration.env` stores the control repository URL and host paths/user settings with mode 0600; it contains no PAT value or registration token. Changing the saved legacy repository URL alone does not retarget the installed service.
+Services execute root-owned runtime snapshots under `/usr/local/lib/filius`, not mutable checkout scripts. `/etc/filius/orchestration.env` and the installed `/etc/filius/eligible-repositories.json` are mode 0600; neither contains tokens. `/var/lib/filius-control/state` is root-private and holds locks/lifecycle state. Its parent permits traversal only by root and the dedicated daemon account. Orchestration mounts only `requests` writable and `results` read-only at `/filius-control/`; it gets no PAT, host scripts, deployment files or Docker socket. Requests cannot choose URLs, capacity or commands; results contain non-secret summaries.
 
 The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
 The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, delegates the CPU, cpuset, I/O, memory, and PID cgroup controllers to that user's systemd manager, enables the daemon at boot, and leaves the host's existing Docker daemon running. If the delegation drop-in changes, the setup restarts the `filius-runner` user manager and its rootless Docker daemon; run it only when no runner job is active. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon. Resource-controller warnings can remain if the host does not use unified cgroup v2 or lacks those controllers.
 
-### Run the HelloWorld orchestration placeholder
+### First use case: build this repository on demand
 
 These read-only status/log commands run as root on finius:
 
@@ -60,20 +63,50 @@ sudo journalctl -u filius-orchestrator.service -f
 
 A running service is not proof of successful GitHub registration: confirm `Listening for Jobs` in the journal and an online `docker-orchestrate` runner under this repository's **Settings → Actions → Runners**.
 
-Once `dispatch_runner.yml` exists on GitHub's default branch, open **Actions → Dispatch runner → Run workflow**. Its only step prints `HelloWorld`; it does not discover queued jobs, revive other runners or deploy anything. After that one job, systemd requests a new token and replaces the ephemeral runner. Orchestration has no eight-hour idle limit. Those workload controls remain in [BACKLOG.md](BACKLOG.md).
-
-Unchanged setup reruns reuse the service. If runtime/configuration changes are detected while it is active, setup refuses to overwrite them and explains the explicit update procedure. When no orchestration job is active, run the following as root; stopping the service can cancel its job, and rerunning setup can change host packages/accounts/services and rebuild images:
+Commit/push the changes yourself so `dispatch_runner.yml` is on the default branch. Update the server checkout as your normal admin account, and install the new runtime as root; push alone does not upgrade installed host files. For an existing HelloWorld installation, stop orchestration when no job is running, then install:
 
 ```sh
 sudo systemctl stop filius-orchestrator.service
 sudo /opt/filius/setup.sh
 ```
 
-To restart the already installed runtime, use `sudo systemctl restart filius-orchestrator.service`; this changes service/job state but does not install checkout changes. Stop/recovery targets only the managed `filius-orchestrator` container, not deployed applications. Existing rootless setup may still restart the daemon when cgroup delegation changes; schedule setup with no active jobs.
+Once orchestration is online and build workflows are queued, open **Actions → Dispatch runner → Run workflow**. It waits up to eight minutes for a host result: `enabled`, `reused`, or `no-op`, with a queued-job count. `enabled` confirms a start request, not online registration; check the build journal and GitHub runner status. API/host failures fail dispatch rather than masquerading as an empty queue.
+
+The worker handles `.github/workflows/build.yml` and `build-runner-image.yml` sequentially. No push/schedule trigger starts workers; later-ready jobs require another manual dispatch unless an enabled worker is available. Discovery reads only this eligible repository, not unrelated account repositories.
+
+Read-only host diagnostics (root):
+
+```sh
+sudo systemctl status filius-dispatch.path filius-build-worker.service --no-pager
+sudo journalctl -u filius-dispatch.service -u filius-build-worker.service -f
+```
+
+Confirm `Listening for Jobs` and an online `docker-build` runner. Worker state retains the idle deadline across supervisor restart/ordinary idle failure; a completed job gets a fresh token/idle period. A missing runner with an already elapsed idle budget stays expired until dispatch revives it.
+
+Expiry first removes `docker-build`, waits at least 60 seconds, and rechecks GitHub busy/label state plus local job output before stopping only the managed container. Busy jobs, including long jobs, finish naturally. API/readiness uncertainty defers retirement, so the eight-hour limit can be exceeded safely. Forced registration deletion is attempted only after the idle container has exited. Failed cleanup can leave a quarantined/offline registration requiring operator review.
+
+**Verification limit:** mocked tests do not prove Linux/systemd integration or atomic GitHub assignment/drain behavior. Label removal plus observation is not a documented atomic drain API. Validate near-deadline job pickup on the target host before relying on unattended expiry. Rootless/socket crash recovery and result/quarantine retention are still backlog work.
+
+### Update an installed dispatch runtime
+
+Unchanged setup reruns reuse installed state. Changed runtime/configuration refuses installation while orchestration, dispatch, build supervision or operator drain is active, or a managed build container remains live. Do not dispatch while updating. For later upgrades, run these as root:
+
+```sh
+sudo systemctl stop filius-dispatch.path
+sudo systemctl status filius-dispatch.service --no-pager
+# Wait for any scan and orchestration job to finish before these stops.
+sudo systemctl stop filius-orchestrator.service filius-build-worker.service
+sudo bash /usr/local/lib/filius/host-control/drain.sh
+sudo /opt/filius/setup.sh
+```
+
+Stopping build supervision leaves its launcher/container alone; the operator drain waits for active jobs or uses the same label/busy safety gate to retire an idle listener. It disables the worker without launching replacements. Setup restarts orchestration/request handling, not the drained build worker; manually dispatch when builds are queued again. Drain uses a transient `filius-build-drain.service`; its journal reports deferred conditions. Do not force-stop an uncertain/busy container to make installation pass.
+
+Stopping/restarting orchestration can cancel its own active job. Setup can change packages/accounts/services and rebuild images; cgroup-delegation changes can restart the daemon and affect applications. Schedule it with no active jobs. `sudo systemctl restart filius-orchestrator.service` restarts only installed runtime, not checkout changes.
 
 ### Start the legacy runner pool manually
 
-If build/deployment jobs are needed before on-demand orchestration is implemented, start the legacy pool as root on finius. This starts runner containers and registers them with GitHub:
+For legacy/manual operation instead of the managed worker, start the pool as root on finius. This registers runners and starts containers:
 
 ```sh
 sudo /opt/filius/runner-pool.sh https://github.com/OWNER/REPOSITORY
@@ -120,17 +153,18 @@ The persistent deployment directory is writable by the deployment job and privat
 
 ## Using more repositories
 
-`run-once.sh` registers against one repository URL at a time. The fine-grained PAT must include that repository and have **Administration: Read and write** permission. For repositories under your personal account, run a one-job runner for each repository. To share runners across multiple repositories, GitHub supports organization-level runners for repositories in an organization; this setup script currently uses repository-level registration. See [GitHub's runner concepts](https://docs.github.com/en/actions/concepts/runners/self-hosted-runners).
+The installed dispatch implementation currently supports only this repository. Adding allowlist entries is rejected until multi-repository support is implemented. Manual `run-once.sh` still registers to one supplied repository at a time; its PAT needs access and **Administration: Read and write** there. A personal account has no account-wide shared runner registration. Organization-scoped sharing is a separate GitHub feature, not required by this design.
 
 ## Troubleshooting
 
 - **Rootless Docker socket missing:** rerun `sudo ./rootless-docker/setup.sh`; check the printed systemd status command and the `filius-runner` user service.
 - **Runner image not found:** build it with the rootless daemon as shown above. Images in the rootful daemon are not visible to rootless Docker.
-- **GitHub API returns 403:** confirm the PAT is fine-grained, includes this repository, has **Administration: Read and write**, and belongs to a repository administrator.
+- **GitHub API returns 403:** confirm repository access, **Administration: Read and write**, **Actions: Read**, token expiration and API rate limits. Errors never authorize launches or destructive expiry.
 - **Job stays queued:** check that the runner is online and that the workflow's `runs-on` labels include `self-hosted` and `docker-build`.
-- **HelloWorld stays queued:** check `filius-orchestrator.service` and the online `docker-orchestrate` runner; a `docker-build` runner cannot accept this job.
+- **Dispatch stays queued:** check orchestration and its online `docker-orchestrate` runner; a `docker-build` runner cannot accept dispatch.
+- **Dispatch times out:** verify that checkout changes were installed on the host; inspect `filius-dispatch.path/service`. Excess requests can trip the systemd start limit; investigate before a root `systemctl reset-failed filius-dispatch.path filius-dispatch.service` and `systemctl start filius-dispatch.path` (changes service state).
 - **Orchestration keeps restarting:** inspect its journal for unavailable rootless Docker, PAT/registration failures, or a conflicting container. Setup's service-state check alone does not verify registration.
-- **Runner waits without a job:** this is expected. Push a matching workflow run or dispatch one manually; the launcher exits only after one job completes.
+- **Build runner waits without a job:** expected until its idle deadline; managed expiry may defer when GitHub/local observations are uncertain. Legacy launchers have no idle limit.
 - **Compose bind mount path not found:** use a path beneath `FILIUS_DEPLOYMENTS_DIR`; paths in the runner's temporary checkout are not visible to the rootless daemon on finius.
 
 ## Repository layout
@@ -138,7 +172,13 @@ The persistent deployment directory is writable by the deployment job and privat
 ```text
 rootless-docker/setup.sh       Host account and rootless Docker setup
 rootless-docker/delegate-cgroups.sh  Idempotent systemd cgroup delegation
-setup.sh                      Build images and install/start orchestration
+setup.sh                      Install images, orchestration and demand controls
+eligible-repositories.json    Single-repository eligibility, not automatic startup
+host-control/controller.py   Host-only discovery, requests, worker state and expiry
+host-control/drain.sh         Operator drain via installed systemd environment
+host-control/filius-dispatch.path  Manual request activation
+host-control/filius-dispatch.service  Serialized host queue scan
+host-control/filius-build-worker.service  Demand-enabled build supervision
 orchestration-runner/run-once.sh  Launch/stop the managed orchestration container
 orchestration-runner/filius-orchestrator.service  Boot-persistent worker supervision
 build-runner/Dockerfile        GitHub Actions runner image
@@ -149,8 +189,9 @@ deployment-runner/Dockerfile   Runner image with Docker Compose
 deployment-runner/build.sh     Build the deployment runner image
 deployment-runner/run-once.sh  Start one ephemeral deployment job
 .github/workflows/build.yml    Runner smoke-test workflow
-.github/workflows/dispatch_runner.yml  Manual HelloWorld orchestration placeholder
+.github/workflows/dispatch_runner.yml  Manual scan request and bounded reporting
 .github/workflows/build-runner-image.yml  Rebuild runner image when its inputs change
 compose.runners.yaml           Compose definitions for one-job runner containers
 runner-pool.sh                 Legacy manual 2-build/1-deploy supervisor
+tests/test_host_control.py     Local mocked standard-library behavior tests
 ```

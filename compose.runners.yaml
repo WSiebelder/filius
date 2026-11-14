@@ -1,6 +1,14 @@
 services:
   orchestration-runner:
     image: ${RUNNER_IMAGE:-filius-builder:local}
+    volumes:
+      - type: bind
+        source: ${FILIUS_CONTROL_DIR:-/var/lib/filius-control}/requests
+        target: /filius-control/requests
+      - type: bind
+        source: ${FILIUS_CONTROL_DIR:-/var/lib/filius-control}/results
+        target: /filius-control/results
+        read_only: true
     environment:
       GITHUB_URL: ${GITHUB_URL:?GITHUB_URL is required}
       RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required}

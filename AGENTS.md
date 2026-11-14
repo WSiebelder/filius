@@ -18,19 +18,33 @@ Implemented now:
 - The orchestration service maintains one worker registered to this repository
   by launching fresh one-job ephemeral runners after jobs/exits and at boot.
 - `.github/workflows/dispatch_runner.yml` is manual-only (`workflow_dispatch`).
-  Its only job step is `echo HelloWorld`; it does not discover queues or launch
-  workload runners.
+  It writes an empty run/attempt request, waits for a host result and reports
+  no-op/enable/reuse/errors. Host-only Python scans this repository's queued
+  jobs in queued/active runs and current attempts, with bounded pagination.
+- `eligible-repositories.json` and installed validation currently allow only
+  `WSiebelder/filius`, once, with one managed build worker. Additional targets,
+  counts and control-repository URLs are rejected until support is implemented.
+- `filius-dispatch.path/service` handles constrained scan requests;
+  `filius-build-worker.service` cycles one-job build runners only while enabled
+  by demand. Persistent enabled/identity/idle state survives ordinary restart.
+  Never-enabled/expired workers do not revive on setup/reboot.
+- Eight-hour idle retirement removes `docker-build`, waits at least 60 seconds,
+  and rechecks API busy/labels plus local job evidence before targeted stop.
+  Busy/uncertain work is never deliberately stopped. Operator drain uses the
+  same gate and waits for active jobs instead of launching replacements.
 - Orchestration uses `docker-orchestrate`, not `docker-build` or `docker-deploy`,
   and its container has no Docker socket or deployment-directory mount.
 - `runner-pool.sh` remains a legacy foreground two-build/one-deploy pool for an
   explicitly supplied repository URL. It is not started by setup. The detached
   dashboard rewrite was discarded; do not assume start/status/stop commands,
-  persisted worker state, or eight-hour expiry are present.
+  persisted worker state, or eight-hour expiry exist in this legacy script.
+  Do not run it alongside the managed worker when expecting capacity one.
 
-Queue discovery, eligibility/capacity configuration, workload idle expiry,
-application release/deployment automation, registry publishing and monitoring
-are not implemented. Host boot recovery, registration and job execution have
-not been verified by local syntax checks.
+General multi-repository/capacity configuration, central deployment dispatch,
+application delivery, registry publishing and monitoring remain unimplemented.
+Local mocked/syntax checks do not verify host boot recovery, registration/job
+execution or atomic assignment/drain behavior. Label removal plus observations
+is not a documented atomic drain API; uncertainty defers destructive action.
 
 ## Approved target design
 
@@ -104,6 +118,21 @@ not been verified by local syntax checks.
   `.github/workflows/build-runner-image.yml` rebuilds both local images using an
   already available build runner. Neither runs on orchestration; the rebuild
   workflow does not install host runtime changes or discover new runner releases.
+- `host-control/controller.py` is Python 3.8+ standard-library host logic.
+  Install snapshots beneath `/usr/local/lib/filius`; root-owned eligibility
+  remains authoritative. Requests cannot choose URLs, capacity or commands.
+  Orchestration gets only writable requests/read-only results, not state,
+  host code, PAT or Docker. Never write results through guest-controlled paths,
+  follow request symlinks or source request payloads/service env as shell code.
+- `/var/lib/filius-control` allows traversal only by root/the dedicated daemon
+  group; its `state` directory is root-private. Locks serialize activation and
+  supervision; durable state preserves idle budgets. Changed installation
+  refuses active services/drain or a live managed build container.
+- Stopping build supervision leaves its launcher/container alone. The installed
+  operator `host-control/drain.sh` waits for natural job completion or safely
+  retires an idle listener. Do not use process-name kills, blind job timeouts or
+  forced busy registration removal. Forced runner deletion follows verified
+  idle container exit only.
 - Runner versions remain pinned; startup warns about newer stable releases and
   ephemeral registration uses `--disableupdate`. Latest-stable setup/update
   resolution is future work, not an implemented feature.
@@ -115,8 +144,8 @@ at `/etc/filius/github-token` with root-only permissions. Pass only a fresh
 short-lived registration token at runner startup. Never put secrets in source,
 image layers, logs, committed environment files or service configuration.
 
-Host registration currently requires repository Administration read/write for
-a fine-grained PAT; future queue discovery also needs Actions read permission
+Host registration/label management requires repository Administration read/write
+for a fine-grained PAT; implemented queue discovery needs Actions read permission
 for selected repositories. GitHub account changes, registration, workflow
 dispatch and credential/permission changes require explicit user authorization.
 
@@ -131,7 +160,7 @@ recovery remains unfinished.
 
 Rootless Docker and ephemeral jobs are not VM isolation. Build/deployment jobs
 control the same daemon as applications. Run trusted workflows only. Keep
-future host discovery/launch control authenticated and constrained by installed
+host discovery/launch control authenticated and constrained by installed
 configuration; do not expose the PAT or arbitrary root execution to jobs.
 
 ## Editing and verification
@@ -151,5 +180,8 @@ configuration; do not expose the PAT or arbitrary root execution to jobs.
 - Use available existing check tools. Do not treat macOS Bash 3.2 parsing as
   proof of Bash 4+ host behavior, or service active state as proof of online
   GitHub registration. State unavailable checks and unverified behavior plainly.
+- Local mocked validation: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests`.
+  This does not authorize real API calls, Docker, setup or services. The
+  first-repo slice explicitly authorizes these local mocked/syntax checks only.
 - Before suggesting host commands, distinguish root from `filius-runner` and
   identify effects on packages, accounts, services, jobs and applications.

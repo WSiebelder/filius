@@ -2,214 +2,150 @@
 
 ## Snapshot and verification boundary
 
-The original assessment inspected HEAD `4679a0a` (`fix setup user group syntax`)
-and four staged source changes. Documentation was subsequently committed at
-`bff793e` (`Add state and backlog md`), and those four source changes were
-unstaged. The orchestration slice was committed at `f6d79c4`, integrating the
-shared launcher changes. The remaining detached pool/dashboard rewrite and
-matching README changes were subsequently discarded at the user's request.
+Baseline for this slice is `b943a5d` (`update the design parameters`). The
+worktree now implements this repository as the first eligible, demand-driven
+build target. These changes are intentionally uncommitted: the user will
+commit/push and install the runtime on the server.
 
-This describes source, not verified server operation. No tests, Docker builds,
-host setup, service startup or GitHub configuration/registration were executed.
-Only local syntax and available lint checks are authorized. Actual runner
-availability, boot recovery, deployed applications and Linux Mint compatibility
-remain unverified. Authenticated GitHub CLI access was unavailable during the
-original assessment; the supplied account type was not verified.
+This describes source, not verified server operation. Local standard-library
+mocked tests cover discovery, request isolation, singleton activation, restart
+state, idle expiry and operator drain. Shell/YAML/embedded workflow syntax and
+diff whitespace are checked locally. No real GitHub requests, Docker operations,
+host setup, services, workflow execution or account changes were performed.
+macOS Bash 3.2 parsing is not Bash 4+ Linux runtime verification. ShellCheck,
+actionlint and newer Bash were unavailable.
 
-Local shell syntax checks and YAML parsing passed, as did diff whitespace checks.
-Only macOS Bash 3.2 was available for syntax parsing; the host scripts require
-Bash 4+ features, so this is not compatible-host runtime verification.
-ShellCheck, actionlint and a newer Bash were unavailable; none was installed.
+Linux Mint/systemd integration, online registration, actual build pickup,
+reboot recovery and near-deadline assignment/drain behavior remain unverified.
+Mocks do not establish an atomic GitHub drain guarantee.
 
-## Implemented orchestration slice
+## Implemented first-repository path
 
-`setup.sh` now installs a root-owned runtime and enables/starts one
-`filius-orchestrator.service` on the target host. It launches one ephemeral
-runner per job, requests a new token on every cycle and restarts after exits
-with a delay. The service is boot-enabled and exempt from workload idle expiry.
+- Root `setup.sh` prepares the dedicated rootless daemon, builds the pinned
+  runner images and installs root-owned runtime/configuration/systemd units.
+  It starts permanent orchestration and request handling, not workload workers.
+- `eligible-repositories.json` lists only `https://github.com/WSiebelder/filius`.
+  Capacity is fixed at one managed build worker. Other repositories, duplicates,
+  extra settings and a different control URL fail validation.
+- Manual-only `dispatch_runner.yml` runs on `docker-orchestrate`. It writes an
+  empty run/attempt-specific request and waits up to eight minutes for its
+  read-only result. No account token or Docker access is given to orchestration.
+- `filius-dispatch.path` activates a serialized host scan. The host-only PAT
+  reads queued and active runs and their current-attempt jobs, with bounded API
+  requests and pagination. Resolved queued jobs requiring `self-hosted` and
+  `docker-build`, with no unsupported labels, qualify. Waiting runs, unresolved
+  labels, cancelled/completed work and other roles do not.
+- Matching demand enables/reuses one `filius-build-worker.service`; no demand
+  is a successful no-op. Activation is serialized and demand is rechecked
+  before enabling absent capacity. `enabled`/`reused` acknowledge host activation,
+  not proof of online registration. API failures fail the request.
+- Build supervision launches fresh, collision-resistant one-job runners using
+  the existing shared launcher and a fresh registration token on every cycle.
+  The smoke test and image rebuild workflows keep their existing triggers and
+  `docker-build` labels and can run sequentially.
+- Persistent enabled state, managed identity, job evidence and idle deadline
+  survive ordinary supervisor restart. Restart adopts an existing live managed
+  container rather than replacing it. Eight hours of continuous idle triggers
+  retirement; missing capacity whose idle budget already elapsed is disabled
+  without launching a replacement. Setup/reboot does not revive expired or
+  never-enabled workers. Manual demand can renew an overdue/quarantined listener.
+- Idle retirement removes `docker-build`, waits at least 60 seconds, then
+  rechecks busy/label state and local job output before targeted container stop.
+  A racing/busy job is allowed to finish; API/readiness uncertainty defers
+  cleanup. The registration is force-deleted only after the idle container
+  exited. Cleanup failure can leave a quarantined/offline registration.
+- Operator drain supports installation updates: stopping build supervision
+  leaves the shared launcher/container running; drain waits for a busy job or
+  uses the same idle safety gate, then disables the worker without replacements.
 
-The runner uses `filius-builder:local` but only the `docker-orchestrate` custom
-label. Its container has no Docker socket, deployment directory or host PAT.
-The host launcher still uses the dedicated rootless daemon. The manual-only
-`.github/workflows/dispatch_runner.yml` has one step: `echo HelloWorld`.
-It does not scan queues, revive other workers, build or deploy.
+The eight-hour deadline is a safety-first goal, not justification to kill
+uncertain work. GitHub label removal and subsequent observations are not a
+documented atomic drain operation; live assignment races need target-host
+acceptance. Default-label workflows can bypass role labels, so only trusted,
+explicitly role-labelled workflows belong here.
 
-Unchanged setup reuses the service. Updating active installed runtime/settings
-requires an explicit stop and rerun, rather than overwriting files mid-job.
-Service stop/recovery targets only the managed orchestration container.
-The existing rootless setup can still restart the daemon for cgroup changes.
-Full workload lifecycle and live-update safety remain backlog work.
-
-## Intended destination
-
-The target is a headless Ubuntu-based Linux Mint server with an idempotent
-root-level `setup.sh` that prepares the host, builds current stable Actions
-runner images, and keeps an orchestration worker registered to this repository
-available through boot-persistent host supervision.
-
-The locked target uses repository-scoped registrations, not an organization
-pool. Eventually the manually triggered `dispatch_runner` workflow here queries account
-repositories for runnable queued jobs and starts workers only for eligible
-repositories with matching demand. The configured repository list is an
-allowlist, not a blanket startup list; configured counts cap worker capacity.
-Existing workers are reused. The scan also starts the single deployment worker
-registered here only when its central queue needs it. Workload workers
-expire after eight continuous idle hours and remain stopped until manually
-revived; active jobs are never killed by that idle limit. The orchestration
-worker is exempt and is replaced after each ephemeral job. Discovery is
-on-demand only; no periodic polling or continuously running scheduler is planned.
-Jobs becoming ready after the scan need another dispatch unless an already
-enabled matching worker can accept them.
-
-Reusable build workflows should test proposed PR merge results, build/test
-`master` after merges and produce repository-defined image names/versions.
-Deployment requests execute centrally in this repository, globally serialized
-on its single deployment worker, to update Compose applications on the same
-machine. A reusable workflow called from another repository does not itself
-transfer execution here. Requests can remain queued until manual revival.
-Updating a Compose service's image reference remains the preferred direction;
-release handoff and deployment details remain undecided.
-
-Beyond the orchestration/HelloWorld slice above, these are goals, not completed
-features. See the locked target and B01-B11 in
-[BACKLOG.md](BACKLOG.md); the original organization-wide proposal is superseded.
-
-## Architecture in the current worktree
+## Architecture and isolation
 
 ```text
-root/admin: setup.sh
-  -> rootless-docker/setup.sh + delegate-cgroups.sh
-  -> filius-runner's rootless Docker daemon
-  -> build-runner/build.sh -> filius-builder:local
-  -> deployment-runner/build.sh -> filius-deployer:local
-  -> root-owned runtime in /usr/local/lib/filius
-  -> enabled filius-orchestrator.service
-     -> fresh token -> socket-free orchestration container -> HelloWorld
-     -> systemd repeats after one-job exit
+root setup -> rootless account/daemon + images + installed runtime
+  -> boot-persistent filius-orchestrator.service
+     -> fresh token -> one socket-free docker-orchestrate runner
+     -> manual dispatch writes request, reads result, exits
+  -> filius-dispatch.path -> host-only filius-dispatch.service
+     -> installed allowlist + host PAT -> this repository's runs/jobs
+     -> no-op / reuse / enable one build worker -> non-secret result
+  -> demand-enabled filius-build-worker.service
+     -> fresh token -> docker-build runner -> one job -> replacement
+     -> continuous idle deadline -> label quarantine -> safe retirement
 
-root/admin: separately/manually start legacy runner-pool.sh
-  -> 2 build loops + 1 deployment loop, for one repository
-  -> host PAT -> GitHub repository registration API -> fresh runner token
-  -> docker compose run --rm -> ephemeral runner -> one matching job
-  -> repeat with a new registration token
-
+legacy/manual pool -> 2 build loops + 1 deploy loop for an explicit repository
 deployment job -> persistent Compose project -> same rootless daemon
 ```
 
-The legacy pool runs in the foreground, with no dashboard, boot service or
-idle expiry. The rootless Docker daemon and new orchestration service are
-boot-enabled; setup does not start the legacy build/deployment pool.
-
-### File responsibilities
-
-References below describe current worktree source, including uncommitted changes.
-
-| File / source location | Implemented responsibility |
+| Item | Location or behavior |
 | --- | --- |
-| `setup.sh:10-32` | Requires root, Debian/Ubuntu-family identification, systemd and apt; installs missing curl/jq. |
-| `setup.sh:34-82` | Prompts for a host PAT and one repository URL, persists them, and requests/discards a registration token to check access. Accepts `https://github.com/OWNER/REPOSITORY`, not an organization URL. |
-| `setup.sh:84-225` | Runs rootless setup, builds/checks both images, installs root-owned orchestration runtime/configuration/unit and enables/starts the service. |
-| `rootless-docker/setup.sh:23-44,70-106,120-153` | Manages the locked service account, deployment directory, rootless prerequisites and subordinate IDs; enables linger and Docker's user service. Docker CLI/Engine and matching rootless tooling remain prerequisites or conditional package installs. |
-| `rootless-docker/delegate-cgroups.sh:19-49` | Idempotently writes the CPU/cpuset/I/O/memory/PID delegation drop-in. Changes can restart the user manager and its rootless daemon. |
-| `build-runner/Dockerfile:1-39` | Ubuntu-based x64 runner image, pinned Actions runner `2.338.2`, container UID 1001, `docker-build` labels, ephemeral operation. |
-| `build-runner/build.sh:1-7` | Builds `filius-builder:local`; does not discover the latest runner release. |
-| `build-runner/runner-entrypoint.sh:4-35` | Warns about newer stable runner releases; registers with `--unattended`, `--disableupdate`, ephemeral mode and `--replace`, then runs the job listener. |
-| `build-runner/run-once.sh:22-135` | Root-only one-job launcher for build/deploy/orchestration; socket coordination applies only to mounted-socket roles. Requests a fresh repository token with bounded HTTP timeouts and starts one removable container. |
-| `deployment-runner/Dockerfile:1-12` | Extends the builder with Compose v2 and rsync, retaining the non-root runner user and using `docker-deploy` labels. |
-| `deployment-runner/build.sh:1-5`, `deployment-runner/run-once.sh:1-8` | Builds `filius-deployer:local` and selects deployment mode in the shared launcher. |
-| `compose.runners.yaml:1-34` | Adds socket-free orchestration to the existing build/deploy definitions; deploy runners also mount the persistent deployment directory. |
-| `orchestration-runner/run-once.sh:1-43` | Root host service launcher and bounded stop of only the known, Compose-labeled orchestration container. |
-| `orchestration-runner/filius-orchestrator.service:1-21` | Boot-enabled service with restart delay, fresh one-job launches and targeted pre-start/stop cleanup. |
-| `runner-pool.sh:1-54` | Legacy foreground two-build/one-deploy loops for an explicit repository URL; no dashboard or start/status/stop interface. |
-| `.github/workflows/dispatch_runner.yml:1-13` | Manual-only orchestration placeholder printing `HelloWorld`. |
-| `.github/workflows/build.yml:3-39` | Push/manual Docker smoke test using `self-hosted` and `docker-build`; no PR trigger or application release pipeline. |
-| `.github/workflows/build-runner-image.yml:3-34` | Push-on-input-change/manual rebuild of both local images using an already available build runner. Not automatic runner-release discovery or pool bootstrap. |
-| `README.md`, `AGENTS.md` | Usage, architecture, operational constraints, and contributor guidance. The README deployment snippet is an example, not a shipped deployment workflow. |
+| Host administrative identity | Root installs/manages runtime and registration; image builds run as `filius-runner`, jobs as container UID 1001. |
+| Daemon account | Locked `filius-runner`, private `/var/lib/filius-runner` home. |
+| PAT | `/etc/filius/github-token`, root-owned mode 0600; fine-grained repository Administration read/write and Actions read. Never mounted/passed to jobs. |
+| Saved control URL | `/etc/filius/repository-url`; changing it alone does not update installed runtime. |
+| Installed configuration | `/etc/filius/orchestration.env` and `/etc/filius/eligible-repositories.json`, root-owned mode 0600, no token values. |
+| Installed runtime | `/usr/local/lib/filius`; systemd units/drop-ins under `/etc/systemd/system`. Active runtime or a live managed build container prevents changed installation. |
+| Control parent | `/var/lib/filius-control`, root-owned, mode 0710 with dedicated daemon group traversal; no other-user access. |
+| Requests/results | Separate root-owned directories; requests mode 1733 accommodates mapped job UID; results mode 0755 with read-only container bind mount and host-written summaries. |
+| Lifecycle/locks | `/var/lib/filius-control/state`, root-private mode 0700, atomic durable JSON and file locks. Invalid request directories are quarantined here without traversing contents. |
+| Host Docker socket | `/run/user/<filius-runner-uid>/docker.sock`, never the rootful host socket. |
+| Container Docker socket | Only build/deploy mount that rootless source at container `/var/run/docker.sock`. Orchestration gets only request/result mounts. |
+| Deployment projects | `/var/lib/filius-runner/deployments`, same path in deployment container and daemon host. No shipped automated deployment workflow. |
 
-### Identity, configuration and persistence
+Root-owned installed configuration is authoritative. Request names/payloads
+cannot select URLs, capacity, credentials or executables. Symlinks/nonempty
+requests fail; invalid filenames are consumed without scanning. Results use
+separate host-owned paths and run/attempt identifiers, preventing guest-directed
+privileged writes or stale-attempt results. Each service activation consumes
+one request; `DirectoryNotEmpty` retriggers for requests arriving during scans.
+Systemd start limits bound request floods; workflow timeout reports a blocked
+or failed bridge.
 
-| Item | Current location or behavior |
+Build/deploy jobs control the same daemon as applications. Rootless/ephemeral
+runners are not VM isolation. Shared launcher socket permissions are relaxed
+only behind the verified private runtime parent and restored after the last
+normal consumer exits. Forced termination/socket replacement recovery remains
+unfinished. Cgroup-delegation changes during setup can restart the user manager
+and daemon, affecting jobs/apps.
+
+## Pending worktree changes
+
+| Files | Change |
 | --- | --- |
-| Host administrative work | Setup, systemd orchestration, pool management and host launchers run as root. They can install packages, change accounts/services or start/stop workers; jobs still run as container UID 1001. |
-| Docker service identity | Locked `filius-runner`; default home `/var/lib/filius-runner`, mode 0700. Image builds during setup run as this user. |
-| Runner container identity | UID 1001 (`runner`), distinct from host/rootless UID mapping. |
-| Long-lived credential | `/etc/filius/github-token`, outside checkout and containers, mode 0600; current setup requests repository Administration read/write permission. Organization permissions are not implemented. |
-| Saved target | `/etc/filius/repository-url`, one control repository, mode 0600. Setup still prompts on reruns. |
-| Installed service settings | `/etc/filius/orchestration.env`, mode 0600, stores repository URL and host paths/user; no token values. Does not follow later legacy URL-file edits without reinstallation. |
-| Installed service runtime | Root-owned `/usr/local/lib/filius`; unit and user-manager ordering drop-in under `/etc/systemd/system/filius-orchestrator.service*`. |
-| Registration credential | Fresh short-lived token requested by the host for each launch and passed at container startup; the host PAT is not mounted into the runner. |
-| Host Docker endpoint | `/run/user/<filius-runner-uid>/docker.sock`; socket owner and private parent permissions are checked before temporary mode relaxation. |
-| Container Docker endpoint | Build/deploy mount the rootless socket at `/var/run/docker.sock` inside the container, not the host rootful socket. Orchestration receives no socket. |
-| Job labels | Custom roles: `docker-orchestrate`, `docker-build`, `docker-deploy`; all have default `self-hosted,linux,x64` platform labels. |
-| Job workspace | `/home/runner/_work`, inside the removable runner; not a durable daemon-visible application bind-mount path. |
-| Deployment projects | `/var/lib/filius-runner/deployments`, mounted at the same path in deploy runners. Setup leaves this directory mode 0777 behind the private parent, to accommodate container UID mapping. |
-| Legacy pool output | Terminal output only; persisted PID/state/log files belonged to the discarded dashboard rewrite. |
+| `eligible-repositories.json` | First eligible target, one-worker boundary enforced by host logic. |
+| `host-control/controller.py`, `host-control/*.service`, `host-control/*.path`, `host-control/drain.sh` | Constrained request processing, GitHub discovery, persisted build supervision/expiry and operator drain. |
+| `setup.sh` | Python prerequisite, eligibility/Actions checks, root-owned runtime/control installation, active-update guards, path/orchestration enablement and workload boot recovery. |
+| `compose.runners.yaml` | Narrow writable request and read-only result mounts for orchestration; existing build/deploy socket/mount behavior retained. |
+| `.github/workflows/dispatch_runner.yml` | Replaces HelloWorld with manual request/bounded result reporting; no push/schedule trigger or extra token permissions. |
+| `tests/test_host_control.py` | Focused mocked tests; no live API/Docker/systemd access. |
+| `README.md`, `STATE.md`, `BACKLOG.md`, `AGENTS.md` | Current implementation, installation sequence, safety constraints and remaining scope. |
 
-Source: `setup.sh:5-8,34-82`; `rootless-docker/setup.sh:23-44`;
-`setup.sh:135-225`; `build-runner/Dockerfile:22-39`;
-`build-runner/run-once.sh:6-14,26-70,107-135`;
-`compose.runners.yaml:1-34`; `runner-pool.sh:1-54`.
+`runner-pool.sh`, the two build workflows, runner images/entrypoint and shared
+launcher are unchanged in this slice. Do not combine the managed worker with
+the legacy fixed pool if expecting capacity one.
 
-Deployment containers and named volumes can outlive a runner container in the
-rootless daemon. They are not shown to be deployed by this repository.
-Rootless port binding and host networking/exposure still need application-level
-decisions.
+## History and remaining destination
 
-## Implementation history
+Initial assessment inspected `4679a0a` and four staged changes. Documentation
+was committed at `bff793e`; orchestration/HelloWorld and shared launcher support
+were committed at `f6d79c4`. The unrelated detached dashboard/pool rewrite and
+matching README edits were discarded at the user's request. `b943a5d` committed
+the revised design documentation. This slice builds on that clean baseline.
 
-The table records the orchestration implementation review before commit.
-Orchestration was then committed; the unrelated pool rewrite was discarded.
+Remaining goals include general eligible repository/capacity configuration,
+one centrally executed deployment worker, release submission/authorization,
+reusable PR merge-result and master CI, immutable image handoff, Compose update/
+health/rollback, latest-stable runner selection, resource limits, retention and
+monitoring. Personal-account repositories continue to use repository-scoped
+registration; no organization or account-wide runner scope is required.
 
-| File | Committed baseline | Pending worktree behavior |
-| --- | --- | --- |
-| `runner-pool.sh` | Foreground loops for two build workers and one deployment worker, explicit repository URL, parent/child shutdown handling. | Proposed detached workers/dashboard were not committed and have been discarded; the foreground implementation remains. |
-| `build-runner/run-once.sh` | Each launcher saves/restores socket mode independently. | Preserves prior shared socket coordination and adds an orchestration role that skips relaxation, selects its service and accepts a service-specific name. |
-| `setup.sh` | Prints foreground pool-start instructions; starts no runners. | Builds existing images, installs/enables/starts orchestration; does not start the legacy workload pool. |
-| `README.md` | Describes foreground pool/Ctrl-C shutdown. | Documents automatic orchestration/HelloWorld and the separate foreground legacy pool. Dashboard instructions were excluded from the commit and discarded afterward. |
-| New orchestration runtime, Compose service and dispatch workflow | No orchestration role/service/workflow. | Root-owned service installation, socket-free ephemeral orchestration and manual HelloWorld placeholder. |
-
-The orchestration source is committed but unverified on the server. Restoring
-the legacy pool removed only its uncommitted rewrite, not orchestration or
-shared socket coordination. This is not a completed implementation of the full backlog.
-
-## Gaps and operational caveats
-
-- **Multi-repository orchestration absent:** all host launchers still use
-  repository registration.
-  GitHub [organization-level runners](https://docs.github.com/en/actions/concepts/runners/self-hosted-runners)
-  can serve organization repositories; repository-level runners serve one
-  repository. A personal account does not automatically supply organization
-  runner scope. The new target retains repository registration, with central
-  configuration, per-repository builds and centrally executed deployments;
-  no organization or repository migration is required. Owner URLs are
-  configuration aids, not account-wide registration scopes. The supplied
-  account's type is unresolved but no longer a blocker for this design.
-  See B01, B11.
-- **Incomplete workload lifecycle:** Docker and orchestration are boot-enabled
-  in source, with a HelloWorld dispatch placeholder. Workload workers still
-  require separate manual start; capacity configuration, queue discovery,
-  automatic workload launches and eight-hour idle expiry are absent.
-  See B03-B04, B11.
-- **Not latest-version bootstrap:** image builds use the pinned runner version;
-  startup only warns about updates. The self-hosted rebuild workflow requires
-  a working runner and an input change/manual dispatch. See B05.
-- **Concurrency concerns from inspection:** same-kind workers can produce the
-  same hostname/second-based name (`build-runner/run-once.sh:107`) while runner
-  registration uses `--replace` (`build-runner/runner-entrypoint.sh:32`). The
-  legacy pool has no demand-based capacity management or idle-expiry state.
-  These are inspection concerns, not reproduced failures. See B03.
-- **Recovery boundaries:** socket reference-count correctness after forced
-  termination or socket replacement, runner-container cleanup on cancellation,
-  and stop completion are unverified. Service journals are available, but
-  monitoring is not implemented. See B03, B09-B10.
-- **Shared privilege and resources:** build/deploy jobs control the same rootless
-  daemon; orchestration has no socket. Labels do not isolate builds from deployed applications; ephemeral
-  runners do not make untrusted jobs safe. Keep workflow code trusted, the PAT
-  host-only, and the socket parent private. Cgroup-delegation changes can
-  restart the daemon, affecting both jobs and applications. See B02-B04, B09.
-- **Application delivery absent:** no reusable merge-result CI, master release
-  naming/version contract, image publishing/handoff, or deployment workflow.
-  Registry publishing and monitoring are future work. See B06-B09.
-- **Validation absent:** no tracked automated test suite/lint configuration was
-  found. Mint-specific prerequisites and repeated-setup/boot/job/deploy behavior
-  need explicitly authorized host verification. See B10.
+The image remains pinned to runner `2.338.2`; startup only warns about newer
+stable versions and uses `--disableupdate`. The self-hosted image rebuild
+workflow needs a healthy build runner, so root setup/manual rebuild is still
+the independent recovery path. See [BACKLOG.md](BACKLOG.md), especially B03,
+B05, B09-B11, for incomplete recovery, live acceptance and delivery work.

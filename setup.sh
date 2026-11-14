@@ -26,15 +26,16 @@ if ! command -v systemctl >/dev/null || ! command -v apt-get >/dev/null; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null || ! command -v jq >/dev/null; then
+if ! command -v curl >/dev/null || ! command -v jq >/dev/null || [[ ! -x /usr/bin/python3 ]]; then
   apt-get update
-  apt-get install -y --no-install-recommends curl jq
+  apt-get install -y --no-install-recommends curl jq python3
 fi
+/usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 8), "Python 3.8+ is required"'
 
 install -d -m 700 "$(dirname -- "${TOKEN_FILE}")"
 if [[ ! -s "${TOKEN_FILE}" ]]; then
   echo "No GitHub PAT found at ${TOKEN_FILE}."
-  echo "Create a fine-grained PAT with repository Administration: Read and write permission."
+  echo "Create a fine-grained PAT with repository Administration: Read and write, and Actions: Read permissions."
   read -r -s -p "Paste the PAT (input hidden): " github_pat
   echo
   if [[ -z "${github_pat}" ]]; then
@@ -46,6 +47,7 @@ if [[ ! -s "${TOKEN_FILE}" ]]; then
   unset github_pat
 fi
 chmod 600 "${TOKEN_FILE}"
+chown root:root "${TOKEN_FILE}"
 
 configured_repo=""
 if [[ -s "${REPO_FILE}" ]]; then
@@ -62,6 +64,10 @@ if [[ ! "${github_url}" =~ ^https://github\.com/([^/]+)/([^/]+)$ ]]; then
 fi
 owner="${BASH_REMATCH[1]}"
 repo="${BASH_REMATCH[2]}"
+/usr/bin/python3 "${SCRIPT_DIR}/host-control/controller.py" validate "${SCRIPT_DIR}/eligible-repositories.json" "${github_url}"
+GITHUB_URL="${github_url}" GITHUB_PAT_FILE="${TOKEN_FILE}" \
+  FILIUS_ELIGIBILITY_FILE="${SCRIPT_DIR}/eligible-repositories.json" \
+  /usr/bin/python3 "${SCRIPT_DIR}/host-control/controller.py" check-access
 api_url="https://api.github.com/repos/${owner}/${repo}/actions/runners/registration-token"
 github_pat="$(<"${TOKEN_FILE}")"
 
@@ -133,11 +139,13 @@ runuser -u "${RUNNER_USER}" -- env \
   docker image inspect filius-deployer:local >/dev/null
 
 command -v timeout >/dev/null || { echo "timeout is required for bounded orchestration shutdown." >&2; exit 1; }
+command -v flock >/dev/null || { echo "flock is required for managed build socket coordination." >&2; exit 1; }
 readonly orchestration_unit=filius-orchestrator.service
 readonly runtime_dir=/usr/local/lib/filius
 readonly unit_file="/etc/systemd/system/${orchestration_unit}"
 readonly dropin_dir="${unit_file}.d"
 readonly orchestration_env=/etc/filius/orchestration.env
+readonly control_dir=/var/lib/filius-control
 temporary_dir="$(mktemp -d)"
 cleanup_installation() {
   rm -f "${temporary_dir}/orchestration.env" "${temporary_dir}/rootless-docker.conf"
@@ -161,6 +169,8 @@ write_setting() {
   write_setting RUNNER_DOCKER_USER "${RUNNER_USER}"
   write_setting RUNNER_HOME "${RUNNER_HOME}"
   write_setting DOCKER_SOCKET "${docker_socket}"
+  write_setting FILIUS_CONTROL_DIR "${control_dir}"
+  write_setting FILIUS_ELIGIBILITY_FILE /etc/filius/eligible-repositories.json
 } >"${temporary_dir}/orchestration.env"
 printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' \
   "${runner_uid}" "${runner_uid}" >"${temporary_dir}/rootless-docker.conf"
@@ -172,6 +182,14 @@ runtime_sources=(
   "${SCRIPT_DIR}/orchestration-runner/filius-orchestrator.service"
   "${temporary_dir}/orchestration.env"
   "${temporary_dir}/rootless-docker.conf"
+  "${SCRIPT_DIR}/eligible-repositories.json"
+  "${SCRIPT_DIR}/host-control/controller.py"
+  "${SCRIPT_DIR}/host-control/drain.sh"
+  "${SCRIPT_DIR}/host-control/filius-dispatch.path"
+  "${SCRIPT_DIR}/host-control/filius-dispatch.service"
+  "${SCRIPT_DIR}/host-control/filius-build-worker.service"
+  "${temporary_dir}/rootless-docker.conf"
+  "${temporary_dir}/rootless-docker.conf"
 )
 runtime_targets=(
   "${runtime_dir}/build-runner/run-once.sh"
@@ -180,29 +198,63 @@ runtime_targets=(
   "${unit_file}"
   "${orchestration_env}"
   "${dropin_dir}/rootless-docker.conf"
+  /etc/filius/eligible-repositories.json
+  "${runtime_dir}/host-control/controller.py"
+  "${runtime_dir}/host-control/drain.sh"
+  /etc/systemd/system/filius-dispatch.path
+  /etc/systemd/system/filius-dispatch.service
+  /etc/systemd/system/filius-build-worker.service
+  /etc/systemd/system/filius-dispatch.service.d/rootless-docker.conf
+  /etc/systemd/system/filius-build-worker.service.d/rootless-docker.conf
 )
-service_state="$(systemctl show --property=ActiveState --value "${orchestration_unit}" 2>/dev/null || true)"
-case "${service_state}" in
-  active|activating|deactivating)
-    for i in "${!runtime_sources[@]}"; do
-      if ! cmp -s "${runtime_sources[$i]}" "${runtime_targets[$i]}"; then
-        echo "Orchestration runtime changes require an explicit stop before installation." >&2
-        echo "When no orchestration job is active, run: sudo systemctl stop ${orchestration_unit}" >&2
-        echo "Then rerun sudo ${SCRIPT_DIR}/setup.sh to install the changes and start the service." >&2
+runtime_changed=0
+for i in "${!runtime_sources[@]}"; do
+  if ! cmp -s "${runtime_sources[$i]}" "${runtime_targets[$i]}"; then
+    runtime_changed=1
+  fi
+done
+if ((runtime_changed)); then
+  for unit in "${orchestration_unit}" filius-build-worker.service filius-dispatch.path filius-dispatch.service filius-build-drain.service; do
+    service_state="$(systemctl show --property=ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${service_state}" in
+      active|activating|deactivating)
+        echo "Runtime changes require an explicit stop of ${unit} before installation." >&2
+        echo "Pause dispatch, stop supervision when safe, and wait for build containers to finish; see README.md." >&2
         exit 1
-      fi
-    done
-    ;;
-esac
+        ;;
+    esac
+  done
+  if [[ -f "${control_dir}/state/worker.json" ]]; then
+    GITHUB_URL="${github_url}" DOCKER_SOCKET="${docker_socket}" \
+      FILIUS_CONTROL_DIR="${control_dir}" FILIUS_ELIGIBILITY_FILE="${SCRIPT_DIR}/eligible-repositories.json" \
+      /usr/bin/python3 "${SCRIPT_DIR}/host-control/controller.py" check-install
+  fi
+fi
 
-echo "Installing the root-owned orchestration runtime..."
+echo "Installing the root-owned orchestration and demand-enabled build runtime..."
 install -d -o root -g root -m 755 "${runtime_dir}" \
-  "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${dropin_dir}"
+  "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${runtime_dir}/host-control" "${dropin_dir}" \
+  /etc/systemd/system/filius-dispatch.service.d /etc/systemd/system/filius-build-worker.service.d
 install -d -o root -g root -m 700 /etc/filius
+if [[ -L "${control_dir}" ]]; then
+  echo "Refusing a symlink control directory: ${control_dir}" >&2
+  exit 1
+fi
+# The daemon account may traverse this parent for bind mounts; other users may not.
+install -d -o root -g "$(id -gn "${RUNNER_USER}")" -m 710 "${control_dir}"
+for directory in requests results state; do
+  if [[ -L "${control_dir}/${directory}" ]]; then
+    echo "Refusing a symlink control subdirectory: ${directory}" >&2
+    exit 1
+  fi
+done
+install -d -o root -g root -m 1733 "${control_dir}/requests"
+install -d -o root -g root -m 755 "${control_dir}/results"
+install -d -o root -g root -m 700 "${control_dir}/state"
 for i in "${!runtime_sources[@]}"; do
   target="${runtime_targets[$i]}"
   mode=644
-  [[ "${target}" == "${orchestration_env}" ]] && mode=600
+  [[ "${target}" == "${orchestration_env}" || "${target}" == /etc/filius/eligible-repositories.json ]] && mode=600
   if ! cmp -s "${runtime_sources[$i]}" "${target}"; then
     install -o root -g root -m "${mode}" "${runtime_sources[$i]}" "${target}"
   else
@@ -211,6 +263,8 @@ for i in "${!runtime_sources[@]}"; do
   fi
 done
 systemctl daemon-reload
+systemctl enable filius-build-worker.service
+systemctl enable --now filius-dispatch.path
 systemctl enable --now "${orchestration_unit}"
 if ! systemctl is-active --quiet "${orchestration_unit}"; then
   echo "Orchestration service is not active; inspect: sudo journalctl -u ${orchestration_unit}" >&2
@@ -221,5 +275,6 @@ echo
 echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
 echo "The orchestration service is enabled and active. GitHub registration may still be starting."
 echo "Check readiness with: sudo journalctl -u ${orchestration_unit} -f"
-echo "Once the runner is online, manually dispatch dispatch_runner.yml in the selected repository; it prints HelloWorld."
+echo "Once the runner is online, manually dispatch dispatch_runner.yml to start/reuse one build worker for queued build work."
+echo "Build workers are not started by setup; previously enabled state is retained for boot recovery."
 echo "The legacy build/deployment pool has not been started."

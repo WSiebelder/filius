@@ -6,8 +6,27 @@ on:
 permissions: {}
 
 jobs:
-  hello-world:
+  discover-build-work:
     runs-on: [self-hosted, docker-orchestrate]
+    timeout-minutes: 10
     steps:
-      - name: HelloWorld
-        run: echo HelloWorld
+      - name: Request eligible build queue scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          export REQUEST_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$REQUEST_ID" =~ ^[1-9][0-9]{0,19}-[1-9][0-9]{0,5}$ ]]
+          request="/filius-control/requests/${REQUEST_ID}.request"
+          result="/filius-control/results/${REQUEST_ID}.json"
+          (set -o noclobber; : > "$request")
+          deadline=$((SECONDS + 480))
+          until [[ -f "$result" ]]; do
+            if ((SECONDS >= deadline)); then
+              echo "::error::Host scan timed out; inspect filius-dispatch.path/service and the build-worker journal."
+              exit 1
+            fi
+            sleep 2
+          done
+          jq -e '.request_id == env.REQUEST_ID' "$result" >/dev/null
+          cat "$result"
+          jq -e '.ok == true' "$result" >/dev/null
