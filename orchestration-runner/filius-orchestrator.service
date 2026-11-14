@@ -1,0 +1,21 @@
+[Unit]
+Description=Filius ephemeral GitHub orchestration runner
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/filius/orchestration.env
+ExecStartPre=/usr/bin/bash /usr/local/lib/filius/orchestration-runner/run-once.sh stop
+ExecStart=/usr/bin/bash /usr/local/lib/filius/orchestration-runner/run-once.sh start
+ExecStop=/usr/bin/bash /usr/local/lib/filius/orchestration-runner/run-once.sh stop
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

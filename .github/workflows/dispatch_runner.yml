@@ -1,0 +1,13 @@
+name: Dispatch runner
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hello-world:
+    runs-on: [self-hosted, docker-orchestrate]
+    steps:
+      - name: HelloWorld
+        run: echo HelloWorld

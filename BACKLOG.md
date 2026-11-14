@@ -2,9 +2,10 @@
 
 ## Scope and priorities
 
-The first objective is documentation: `STATE.md` records the inspected source
-and staged changes. All implementation below is future work, not functionality
-delivered by this documentation change.
+`STATE.md` records source implementation and pending worktree changes. The
+current slice adds boot-persistent orchestration and a manual HelloWorld
+placeholder. Queue discovery, workload launch/expiry and application delivery
+remain future work; source implementation is not verified server operation.
 
 The destination is an idempotent `setup.sh` for a headless Ubuntu-based Linux
 Mint host, manually requested queue discovery, repository-scoped build runners,
@@ -33,7 +34,7 @@ continuously running scheduler is required.
   repository URLs, build-worker capacity limits and deployment settings.
   The list grants eligibility, not an instruction to start workers for every
   entry. Setup validates and installs this configuration on the host.
-- **Manual discovery and revival:** the `runner_dispatch` workflow, triggered
+- **Manual discovery and revival:** the `dispatch_runner` workflow, triggered
   by `workflow_dispatch`, queries GitHub for pending work under the configured
   account. Only allowlisted repositories with runnable queued jobs matching the
   supported runner labels can receive new workers. Account repository discovery
@@ -78,7 +79,7 @@ reopen the above target choices.
 
 **Priority:** P0. **Dependencies:** none.
 
-**Evidence:** `setup.sh:56-65` and `build-runner/run-once.sh:69-100` require a
+**Evidence:** `setup.sh:56-65` and `build-runner/run-once.sh:75-108` require a
 repository URL and repository registration endpoint. The current pool targets
 one repository and cannot yet distinguish orchestration from ordinary builds.
 
@@ -133,7 +134,7 @@ configuration schema and noninteractive input interface.
 
 **Priority:** P0. **Dependencies:** none.
 
-**Evidence:** `build-runner/run-once.sh:44-65,87-99` adds shared socket state but
+**Evidence:** `build-runner/run-once.sh:40-70,93-107` adds shared socket state but
 uses second-based names; `build-runner/runner-entrypoint.sh:32` uses `--replace`.
 `runner-pool.sh:125-157` lacks a shared start/stop lock and partial-pool repair.
 
@@ -165,8 +166,15 @@ eight hours; ordinary failure recovery must not reset an existing idle deadline.
 
 **Priority:** P0. **Dependencies:** B01, B02, B03.
 
-**Evidence:** `setup.sh:134-138` only prints a manual start command;
-`runner-pool.sh:7,83-146` fixes capacity and opens an interactive dashboard.
+**Status:** Partial source implementation: setup installs/enables/starts one
+orchestration service; systemd cycles ephemeral jobs with fresh tokens. No
+workload supervision/expiry, multi-repository configuration or host acceptance
+is complete.
+
+**Evidence:** `setup.sh:135-225`,
+`orchestration-runner/filius-orchestrator.service:1-21` and
+`orchestration-runner/run-once.sh:1-43` provide the orchestration foundation.
+`runner-pool.sh:7,83-146` still fixes legacy capacity and opens a dashboard.
 
 **Deliverable:** Integrate systemd-managed supervision with setup. Keep one
 orchestration worker registered here continuously available, replacing its
@@ -191,11 +199,15 @@ configuration-change/drain policy and dashboard retention.
 
 **Priority:** P0. **Dependencies:** B01, B03, B04.
 
-**Evidence:** The existing workflows have no orchestration role or pool revival
-operation. Root-only launchers cannot safely be invoked from an ordinary runner
-container merely by mounting the Docker socket.
+**Status:** Dispatch placeholder only: `.github/workflows/dispatch_runner.yml`
+targets `docker-orchestrate` and prints `HelloWorld`. It does not query GitHub,
+apply the eligibility list or launch workload workers.
 
-**Deliverable:** Add the `runner_dispatch` workflow in this repository, triggered
+**Evidence:** The HelloWorld container has no Docker socket or deployment mount
+(`compose.runners.yaml:2-8`). An authenticated, constrained host operation for
+queue discovery/launch remains to be designed.
+
+**Deliverable:** Extend the `dispatch_runner` workflow in this repository, triggered
 by `workflow_dispatch` on the dedicated orchestration label. Invoke an
 authenticated, constrained host operation to query account repository/workflow
 metadata, intersect candidates with the installed eligibility list, and inspect

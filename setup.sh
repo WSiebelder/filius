@@ -53,7 +53,7 @@ if [[ -s "${REPO_FILE}" ]]; then
   configured_repo="${configured_repo%/}"
 fi
 prompt_repo="${configured_repo:-https://github.com/OWNER/REPOSITORY}"
-read -r -p "GitHub repository URL [${prompt_repo}] (press Enter to keep): " github_url
+read -r -p "Orchestration repository URL [${prompt_repo}] (press Enter to keep): " github_url
 github_url="${github_url:-${configured_repo}}"
 github_url="${github_url%/}"
 if [[ ! "${github_url}" =~ ^https://github\.com/([^/]+)/([^/]+)$ ]]; then
@@ -132,7 +132,94 @@ runuser -u "${RUNNER_USER}" -- env \
   DOCKER_HOST="unix://${docker_socket}" \
   docker image inspect filius-deployer:local >/dev/null
 
+command -v timeout >/dev/null || { echo "timeout is required for bounded orchestration shutdown." >&2; exit 1; }
+readonly orchestration_unit=filius-orchestrator.service
+readonly runtime_dir=/usr/local/lib/filius
+readonly unit_file="/etc/systemd/system/${orchestration_unit}"
+readonly dropin_dir="${unit_file}.d"
+readonly orchestration_env=/etc/filius/orchestration.env
+temporary_dir="$(mktemp -d)"
+cleanup_installation() {
+  rm -f "${temporary_dir}/orchestration.env" "${temporary_dir}/rootless-docker.conf"
+  rmdir "${temporary_dir}"
+}
+trap cleanup_installation EXIT
+
+write_setting() {
+  local key="$1" value="$2"
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "Orchestration configuration must not contain line breaks: ${key}" >&2
+    exit 1
+  fi
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "${key}" "${value}"
+}
+{
+  write_setting GITHUB_URL "${github_url}"
+  write_setting GITHUB_PAT_FILE "${TOKEN_FILE}"
+  write_setting RUNNER_DOCKER_USER "${RUNNER_USER}"
+  write_setting RUNNER_HOME "${RUNNER_HOME}"
+  write_setting DOCKER_SOCKET "${docker_socket}"
+} >"${temporary_dir}/orchestration.env"
+printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' \
+  "${runner_uid}" "${runner_uid}" >"${temporary_dir}/rootless-docker.conf"
+
+runtime_sources=(
+  "${SCRIPT_DIR}/build-runner/run-once.sh"
+  "${SCRIPT_DIR}/orchestration-runner/run-once.sh"
+  "${SCRIPT_DIR}/compose.runners.yaml"
+  "${SCRIPT_DIR}/orchestration-runner/filius-orchestrator.service"
+  "${temporary_dir}/orchestration.env"
+  "${temporary_dir}/rootless-docker.conf"
+)
+runtime_targets=(
+  "${runtime_dir}/build-runner/run-once.sh"
+  "${runtime_dir}/orchestration-runner/run-once.sh"
+  "${runtime_dir}/compose.runners.yaml"
+  "${unit_file}"
+  "${orchestration_env}"
+  "${dropin_dir}/rootless-docker.conf"
+)
+service_state="$(systemctl show --property=ActiveState --value "${orchestration_unit}" 2>/dev/null || true)"
+case "${service_state}" in
+  active|activating|deactivating)
+    for i in "${!runtime_sources[@]}"; do
+      if ! cmp -s "${runtime_sources[$i]}" "${runtime_targets[$i]}"; then
+        echo "Orchestration runtime changes require an explicit stop before installation." >&2
+        echo "When no orchestration job is active, run: sudo systemctl stop ${orchestration_unit}" >&2
+        echo "Then rerun sudo ${SCRIPT_DIR}/setup.sh to install the changes and start the service." >&2
+        exit 1
+      fi
+    done
+    ;;
+esac
+
+echo "Installing the root-owned orchestration runtime..."
+install -d -o root -g root -m 755 "${runtime_dir}" \
+  "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${dropin_dir}"
+install -d -o root -g root -m 700 /etc/filius
+for i in "${!runtime_sources[@]}"; do
+  target="${runtime_targets[$i]}"
+  mode=644
+  [[ "${target}" == "${orchestration_env}" ]] && mode=600
+  if ! cmp -s "${runtime_sources[$i]}" "${target}"; then
+    install -o root -g root -m "${mode}" "${runtime_sources[$i]}" "${target}"
+  else
+    chown root:root "${target}"
+    chmod "${mode}" "${target}"
+  fi
+done
+systemctl daemon-reload
+systemctl enable --now "${orchestration_unit}"
+if ! systemctl is-active --quiet "${orchestration_unit}"; then
+  echo "Orchestration service is not active; inspect: sudo journalctl -u ${orchestration_unit}" >&2
+  exit 1
+fi
+
 echo
 echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
-echo "To start 2 build workers and 1 deployment worker, run: sudo ${SCRIPT_DIR}/runner-pool.sh ${github_url}"
-echo "The pool runs in the foreground; press Ctrl-C to stop it. Runner containers are started with Docker Compose."
+echo "The orchestration service is enabled and active. GitHub registration may still be starting."
+echo "Check readiness with: sudo journalctl -u ${orchestration_unit} -f"
+echo "Once the runner is online, manually dispatch dispatch_runner.yml in the selected repository; it prints HelloWorld."
+echo "The legacy build/deployment pool has not been started."

@@ -1,4 +1,12 @@
 services:
+  orchestration-runner:
+    image: ${RUNNER_IMAGE:-filius-builder:local}
+    environment:
+      GITHUB_URL: ${GITHUB_URL:?GITHUB_URL is required}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required}
+      RUNNER_NAME: ${RUNNER_NAME:?RUNNER_NAME is required}
+      RUNNER_LABELS: self-hosted,linux,x64,docker-orchestrate
+
   build-runner:
     image: ${RUNNER_IMAGE:-filius-builder:local}
     volumes:
