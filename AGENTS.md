@@ -120,9 +120,11 @@ is not a documented atomic drain API; uncertainty defers destructive action.
   container. Its systemd unit uses root-owned runtime files installed beneath
   `/usr/local/lib/filius`, not mutable admin-owned checkout scripts.
 - `/etc/filius/orchestration.env` contains only repository and host path/user
-  settings, not token values. Unchanged setup reuses the service. Active runtime
-  changes require an explicit stop/reinstallation; do not silently interrupt
-  jobs or report deferred configuration as already active.
+  settings, not token values. Unchanged setup reuses the services. Changed setup
+  automatically pauses dispatch, stops orchestration/build supervision, safely
+  drains managed build work, installs, and restarts required services. Do not
+  restore manual-stop prerequisites or report deferred configuration as active.
+  Orchestration restarts can cancel its own job; do not dispatch during setup.
 - `deployment-runner/Dockerfile` extends the builder with Compose/rsync.
   Deployment bind mounts must use `/var/lib/filius-runner/deployments` (or its
   configured equivalent), mounted at the same path in container and daemon
@@ -142,8 +144,12 @@ is not a documented atomic drain API; uncertainty defers destructive action.
   follow request symlinks or source request payloads/service env as shell code.
 - `/var/lib/filius-control` allows traversal only by root/the dedicated daemon
   group; its `state` directory is root-private. Locks serialize activation and
-  supervision; durable state preserves idle budgets. Changed installation
-  refuses active services/drain or a live managed build container.
+  supervision; durable state preserves idle budgets. Maintenance `pause` uses
+  the installed service environment and existing idle/busy safety gate without
+  launching replacements. Preserve enabled state and absolute idle deadlines;
+  `resume` restarts only previously enabled supervision, not expired/new work.
+  Stop the broker after draining, start/health-check it before new launches,
+  and abort installation if a drain fails or a managed container remains live.
 - Stopping build supervision leaves its launcher/container alone. The installed
   operator `host-control/drain.sh` waits for natural job completion or safely
   retires an idle listener. Do not use process-name kills, blind job timeouts or

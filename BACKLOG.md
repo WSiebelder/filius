@@ -121,6 +121,12 @@ See [GitHub runner scopes](https://docs.github.com/en/actions/concepts/runners/s
 
 **Priority:** P0. **Dependencies:** none; configuration integrates with B01.
 
+**Status:** Setup now automatically stops/drains managed services before changed
+runtime/settings/rootless inputs are installed, then restarts required services
+and resumes previously enabled build work. Unchanged runtime reuses services;
+worker expiry/deadlines and broker cooldowns are retained. Mocked upgrade tests
+pass; fresh/repeat/failed-upgrade acceptance on Linux Mint remains open.
+
 **Evidence:** `setup.sh:10-32,34-82` still prompts on reruns;
 `rootless-docker/setup.sh:70-98` requires Docker CLI and matching rootless
 tooling, with conditional package installation.
@@ -195,7 +201,9 @@ behavior still need authorized host acceptance.
 orchestration and request handling; systemd cycles ephemeral jobs with fresh
 tokens. One demand-enabled build service persists lifecycle/expiry state and
 does not revive never-enabled/expired workers. Multi-repository/deployment
-supervision and live host acceptance remain incomplete.
+supervision and live host acceptance remain incomplete. Setup now owns automatic
+service maintenance, using a pause that preserves enablement/idle deadlines
+instead of the operator drain's deliberate disablement.
 
 **Evidence:** `setup.sh`, the host-control units,
 `orchestration-runner/filius-orchestrator.service:1-21` and
@@ -218,8 +226,8 @@ Fresh tokens are requested for every ephemeral launch. Duplicate setup/start
 does not duplicate capacity; B03 expiry is not undone by service restart policy.
 Stop/drain follows B03 semantics. Outages do not cause tight loops or leaks.
 
-**Open:** Service layout, resource budget, active-job recovery across reboot,
-configuration-change/drain policy and dashboard retention.
+**Open:** Multi-repository/deployment service layout, resource budget, active-job
+recovery across reboot, live upgrade/daemon-downtime acceptance and dashboard retention.
 
 ## B11 - Add on-demand queue discovery and constrained host launches
 
@@ -412,7 +420,9 @@ acceptable contention on the shared daemon.
 depends on the applicable B01-B09 and B11 implementation.
 
 **Status:** Focused `tests/test_host_control.py` standard-library mocked tests
-cover the first-repo slice. Local shell, YAML, embedded workflow syntax and
+cover the first-repo slice and automatic setup maintenance ordering, repeat/no-op
+behavior, drain failure and preserved worker enablement/idle deadlines.
+Local shell, YAML, embedded workflow syntax and
 whitespace checks are available; ShellCheck/actionlint/newer Bash were unavailable.
 No real host/GitHub/Docker operations are authorized/performed in this slice.
 

@@ -55,6 +55,144 @@ class DispatchMountTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class SetupUpgradeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.units = self.root / "units"
+        self.units.mkdir()
+        (self.root / "state").mkdir()
+        self.events = self.root / "events"
+        self.events.touch()
+        self.source = (Path(__file__).resolve().parents[1] / "setup.sh").read_text()
+
+    def run_maintenance(self, script="prepare_upgrade", **environment):
+        functions = []
+        for name in ("unit_active", "stop_if_active", "wait_for_unit", "prepare_upgrade"):
+            start = self.source.index(name + "() {")
+            end = self.source.index("\n}\n", start) + 2
+            functions.append(self.source[start:end])
+        mocks = """
+            set -euo pipefail
+            control_dir="$MOCK_ROOT"
+            SCRIPT_DIR=/unused-checkout
+            maintenance_prepared=0
+            systemctl() {
+              case "$1" in
+                show)
+                  if [[ -f "$MOCK_UNITS/$4" ]]; then cat "$MOCK_UNITS/$4"; fi
+                  ;;
+                stop)
+                  printf 'stop %s\\n' "$2" >> "$MOCK_EVENTS"
+                  printf 'inactive\\n' > "$MOCK_UNITS/$2"
+                  ;;
+                is-failed)
+                  [[ -f "$MOCK_UNITS/$3" && "$(cat "$MOCK_UNITS/$3")" == failed ]]
+                  ;;
+                reset-failed)
+                  [[ "$(cat "$MOCK_UNITS/$2")" == failed ]]
+                  printf 'reset %s\\n' "$2" >> "$MOCK_EVENTS"
+                  printf 'inactive\\n' > "$MOCK_UNITS/$2"
+                  ;;
+                *) return 99 ;;
+              esac
+            }
+            sleep() {
+              printf 'wait\\n' >> "$MOCK_EVENTS"
+              printf 'inactive\\n' > "$MOCK_UNITS/filius-dispatch.service"
+              printf 'inactive\\n' > "$MOCK_UNITS/filius-build-drain.service"
+              printf 'inactive\\n' > "$MOCK_UNITS/filius-setup-drain.service"
+            }
+            flock() { return "${MOCK_LOCK_STATUS:-0}"; }
+            systemd-run() {
+              printf 'drain\\n' >> "$MOCK_EVENTS"
+              return "${MOCK_DRAIN_STATUS:-0}"
+            }
+        """
+        return subprocess.run(
+            ["/bin/bash", "-c", textwrap.dedent(mocks) + "\n".join(functions) + "\n" + script],
+            env=dict(os.environ, MOCK_ROOT=str(self.root), MOCK_UNITS=str(self.units),
+                     MOCK_EVENTS=str(self.events), **environment),
+            capture_output=True, text=True, timeout=5,
+        )
+
+    def active_services(self):
+        for unit in ("filius-dispatch.path", "filius-dispatch.service",
+                     "filius-orchestrator.service", "filius-build-worker.service",
+                     "filius-token-broker.service"):
+            (self.units / unit).write_text("active\n")
+        (self.root / "state/worker.json").write_text('{"enabled": true}\n')
+        (self.root / "state/supervisor.lock").touch()
+
+    def test_changed_runtime_pauses_once_in_safe_order(self):
+        self.active_services()
+        result = self.run_maintenance("prepare_upgrade\nprepare_upgrade")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events.read_text().splitlines(), [
+            "stop filius-dispatch.path", "wait", "stop filius-orchestrator.service",
+            "stop filius-build-worker.service", "drain", "stop filius-token-broker.service",
+        ])
+
+    def test_old_orchestration_only_installation_needs_no_worker_or_broker(self):
+        (self.units / "filius-orchestrator.service").write_text("active\n")
+        result = self.run_maintenance()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events.read_text(), "stop filius-orchestrator.service\n")
+
+    def test_failed_service_recovery_does_not_reset_unloaded_new_units(self):
+        (self.units / "filius-orchestrator.service").write_text("failed\n")
+        recovery = self.source.split("systemctl daemon-reload\n", 1)[1].split(
+            "systemctl enable --now filius-token-broker.service", 1
+        )[0]
+        result = self.run_maintenance(recovery)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events.read_text(), "reset filius-orchestrator.service\n")
+
+    def test_runtime_comparison_leaves_unchanged_services_and_state_alone(self):
+        self.active_services()
+        source, target = self.root / "source", self.root / "target"
+        source.write_text("desired configuration\n")
+        target.write_text(source.read_text())
+        comparison = "runtime_changed=0\n" + self.source.split("runtime_changed=0\n", 1)[1].split(
+            '\necho "Setting up rootless Docker..."', 1
+        )[0]
+        script = 'runtime_sources=("$MOCK_SOURCE")\nruntime_targets=("$MOCK_TARGET")\n'
+        result = self.run_maintenance(
+            script + comparison, MOCK_SOURCE=str(source), MOCK_TARGET=str(target),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events.read_text(), "")
+        self.assertEqual((self.root / "state/worker.json").read_text(), '{"enabled": true}\n')
+        self.assertEqual((self.units / "filius-build-worker.service").read_text(), "active\n")
+        target.write_text("outdated configuration\n")
+        result = self.run_maintenance(
+            script + comparison + '\nprintf "daemon changes\\n" >> "$MOCK_EVENTS"',
+            MOCK_SOURCE=str(source), MOCK_TARGET=str(target),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.events.read_text().splitlines()
+        self.assertLess(events.index("drain"), events.index("daemon changes"))
+
+    def test_failed_drain_aborts_before_broker_stop_or_installation(self):
+        self.active_services()
+        result = self.run_maintenance(
+            'prepare_upgrade\nprintf "installation\\n" >> "$MOCK_EVENTS"', MOCK_DRAIN_STATUS="23",
+        )
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(self.events.read_text().splitlines()[-1], "drain")
+        self.assertEqual((self.units / "filius-token-broker.service").read_text(), "active\n")
+        self.assertEqual((self.root / "state/worker.json").read_text(), '{"enabled": true}\n')
+
+    def test_foreground_owner_is_not_killed_to_force_an_upgrade(self):
+        self.active_services()
+        result = self.run_maintenance(MOCK_LOCK_STATUS="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("foreground --all worker", result.stderr)
+        self.assertNotIn("drain", self.events.read_text().splitlines())
+        self.assertEqual((self.units / "filius-token-broker.service").read_text(), "active\n")
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.api = control.GitHub("test-only-token")
@@ -473,6 +611,77 @@ class HostTests(unittest.TestCase):
         ]
         self.assertFalse(worker.tick(160, draining=True))
         self.host.command.assert_called_once_with(["docker", "stop", "--time", "30", "managed-container"])
+
+    def test_upgrade_pause_waits_for_busy_job_and_preserves_enabled_state(self):
+        worker = self.live_worker(idle_deadline=100)
+        self.runner(busy=True)
+        self.assertTrue(worker.tick(99, paused=True))
+        self.host.command.assert_not_called()
+        self.host.container.return_value = None
+        self.assertFalse(worker.tick(200, paused=True))
+        state = self.host.load()
+        self.assertTrue(state["enabled"])
+        self.assertIsNone(state["name"])
+        self.assertIsNone(state["idle_deadline"])
+        self.host.launch.assert_not_called()
+        control.Worker(self.host).tick(201)
+        self.host.launch.assert_called_once()
+
+    def test_upgrade_pause_safely_retires_idle_listener_without_resetting_budget(self):
+        worker = self.live_worker(idle_deadline=1000)
+        self.assertTrue(worker.tick(100, paused=True))
+        self.api.request.assert_called_once_with("/actions/runners/7/labels/docker-build", "DELETE")
+        self.host.command.assert_not_called()
+        self.runner(labels=[])
+        self.host.container.side_effect = [
+            {"id": "managed-container", "running": True}, None,
+        ]
+        self.assertFalse(worker.tick(160, paused=True))
+        state = self.host.load()
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["idle_deadline"], 1000)
+        self.assertIsNone(state["name"])
+        self.host.command.assert_called_once_with(["docker", "stop", "--time", "30", "managed-container"])
+        self.host.container.side_effect = None
+        self.host.container.return_value = None
+        self.assertFalse(control.Worker(self.host).tick(1001))
+        self.host.launch.assert_not_called()
+
+    def test_upgrade_pause_does_not_revive_expired_or_never_enabled_workers(self):
+        for settings in (dict(enabled=False, idle_deadline=None),
+                         dict(enabled=True, idle_deadline=100)):
+            with self.subTest(settings=settings):
+                self.state(**settings)
+                self.assertFalse(control.Worker(self.host).tick(200, paused=True))
+                self.assertFalse(self.host.load()["enabled"])
+        self.host.launch.assert_not_called()
+        self.host.api.assert_not_called()
+
+    def test_interrupted_upgrade_pause_is_not_reported_as_ready_to_install(self):
+        self.live_worker()
+        with patch.object(control.os, "geteuid", return_value=0), \
+                patch.object(control, "Host", return_value=self.host), \
+                patch.object(control.sys, "argv", ["controller.py", "pause"]), \
+                patch.dict(os.environ, {"DOCKER_SOCKET": "/unused-mocked-docker.sock"}), \
+                patch.object(control.Worker, "run"):
+            with self.assertRaisesRegex(control.ControlError, "drain did not finish"):
+                control.main()
+        self.assertTrue(self.host.load()["enabled"])
+        self.host.command.assert_not_called()
+        self.host.activate.assert_not_called()
+
+    def test_upgrade_resume_uses_persisted_enablement_not_queue_discovery(self):
+        with patch.object(control.os, "geteuid", return_value=0), \
+                patch.object(control, "Host", return_value=self.host), \
+                patch.object(control.sys, "argv", ["controller.py", "resume"]):
+            control.main()
+            self.host.activate.assert_not_called()
+            self.state(enabled=True, idle_deadline=1000)
+            control.main()
+        self.host.activate.assert_called_once()
+        self.assertEqual(self.host.load()["idle_deadline"], 1000)
+        self.host.api.assert_not_called()
+        self.host.launch.assert_not_called()
 
     def test_request_result_and_repeat_are_bound_to_run_attempt(self):
         self.api.demand.return_value = 0

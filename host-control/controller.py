@@ -318,7 +318,17 @@ class Worker:
         self.host = host
         self.child = None
 
-    def tick(self, now, draining=False):
+    def retire(self, state, now, paused):
+        enabled = paused and state["enabled"] and (
+            state["seen_job"] or state["idle_deadline"] is None or now < state["idle_deadline"]
+        )
+        deadline = state["idle_deadline"] if enabled else None
+        state.update(enabled=enabled, name=None, idle_deadline=deadline,
+                     quarantine=None, starting=None, seen_job=False)
+        self.host.save(state)
+
+    def tick(self, now, draining=False, paused=False):
+        draining = draining or paused
         host = self.host
         with host.lock("worker"):
             state = host.load()
@@ -337,9 +347,7 @@ class Worker:
                     and state["idle_deadline"] is not None
                     and now >= state["idle_deadline"]
                 ):
-                    state.update(enabled=False, name=None, idle_deadline=None,
-                                 quarantine=None, starting=None, seen_job=False)
-                    host.save(state)
+                    self.retire(state, now, paused)
                     return False
                 # A completed job gets a new budget; idle failure/reboot does not.
                 if state["seen_job"]:
@@ -402,18 +410,17 @@ class Worker:
             remaining = host.container(state["name"])
             if remaining and remaining["running"]:
                 raise ControlError("Managed idle container did not stop")
-            state.update(enabled=False, name=None, idle_deadline=None,
-                         quarantine=None, starting=None, seen_job=False)
-            host.save(state)
-            print("Build worker retired" if draining else "Build worker expired after eight idle hours",
+            self.retire(state, now, paused)
+            print("Build worker paused for installation" if paused else
+                  "Build worker retired" if draining else "Build worker expired after eight idle hours",
                   flush=True)
             # Forced registration deletion is safe only after the idle container exited.
             api.request("/actions/runners/" + str(runner_id), "DELETE")
             return False
 
-    def run(self, draining=False):
+    def run(self, draining=False, paused=False):
         stopping = False
-        if draining:
+        if draining or paused:
             print("Draining build worker; waiting for any active job to finish", flush=True)
 
         def stop(signum, frame):
@@ -424,7 +431,7 @@ class Worker:
         signal.signal(signal.SIGINT, stop)
         while not stopping:
             try:
-                if not self.tick(time.time(), draining=draining):
+                if not self.tick(time.time(), draining=draining, paused=paused):
                     return
             except (ControlError, OSError) as error:
                 print("Build worker deferred: " + safe_error(error), flush=True)
@@ -484,7 +491,7 @@ def main():
         raise ControlError("Host control must run as root")
     host = Host()
     command = sys.argv[1] if len(sys.argv) == 2 else ""
-    if command in ("scan", "worker", "drain", "check-install", "all", "enable"):
+    if command in ("scan", "worker", "drain", "pause", "check-install", "all", "enable"):
         socket = os.environ.get("DOCKER_SOCKET")
         if not socket:
             raise ControlError("Installed DOCKER_SOCKET configuration is required")
@@ -496,6 +503,15 @@ def main():
     elif command in ("worker", "drain"):
         with host.lock("supervisor"):
             Worker(host).run(draining=command == "drain")
+    elif command == "pause":
+        with host.lock("supervisor", blocking=False):
+            Worker(host).run(paused=True)
+            if host.load()["name"] is not None:
+                raise ControlError("Maintenance drain did not finish; leaving the build container untouched")
+    elif command == "resume":
+        with host.lock("worker"):
+            if host.load()["enabled"]:
+                host.activate()
     elif command == "all":
         with host.lock("supervisor", blocking=False):
             print(json.dumps(dispatch(host, manual=True, activate=False)), flush=True)
@@ -514,7 +530,7 @@ def main():
                 if container and container["running"]:
                     raise ControlError("Wait for the managed build container to exit before runtime installation")
     else:
-        raise ControlError("Usage: controller.py scan|worker|all|enable|drain|check-access|check-install|validate FILE URL")
+        raise ControlError("Usage: controller.py scan|worker|all|enable|drain|pause|resume|check-access|check-install|validate FILE URL")
 
 
 if __name__ == "__main__":

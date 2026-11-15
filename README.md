@@ -44,7 +44,7 @@ The installer checks prerequisites, then prompts for a fine-grained PAT if `/etc
 
 Select `https://github.com/WSiebelder/filius`, not an account/organization URL. It is saved in `/etc/filius/repository-url` and offered on reruns. This first-use-case implementation rejects other control repositories.
 
-The PAT stays outside the checkout with root-only permissions. Setup checks registration and Actions access, prepares rootless Docker, builds both images, installs the runtime and enables/starts the token broker, orchestration and request path. It enables build supervision for boot recovery but does not start a build worker itself. Never-enabled/expired workers stay disabled; previously enabled workers retain state on reboot.
+The PAT stays outside the checkout with root-only permissions. Setup checks registration and Actions access, prepares rootless Docker, builds both images, installs the runtime and enables/starts the token broker, orchestration and request path. It enables build supervision for boot recovery and resumes previously enabled build work after upgrades. It does not enable new work: never-enabled/expired workers stay disabled, and existing idle deadlines are retained.
 
 Services execute root-owned runtime snapshots under `/usr/local/lib/filius`, not mutable checkout scripts. `/etc/filius/orchestration.env` and installed eligibility are mode 0600; neither contains tokens. `/var/lib/filius-control/state` is root-private and holds locks, lifecycle and broker guard state. Its parent permits traversal only by root and the dedicated daemon account. Orchestration mounts requests writable, results read-only, and the token-broker directory read-only; it gets no PAT, host scripts, deployment files or Docker socket. Scan requests cannot choose URLs, capacity or commands.
 
@@ -111,7 +111,7 @@ the existing idle/drain machinery. No persistent multi-job runner is introduced.
 
 The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
-The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, delegates the CPU, cpuset, I/O, memory, and PID cgroup controllers to that user's systemd manager, enables the daemon at boot, and leaves the host's existing Docker daemon running. If the delegation drop-in changes, the setup restarts the `filius-runner` user manager and its rootless Docker daemon; run it only when no runner job is active. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon. Resource-controller warnings can remain if the host does not use unified cgroup v2 or lacks those controllers.
+The rootless Docker setup creates `filius-runner`, adds subordinate UID/GID ranges if needed, delegates the CPU, cpuset, I/O, memory, and PID cgroup controllers to that user's systemd manager, enables the daemon at boot, and leaves the host's existing Docker daemon running. If the delegation drop-in changes, setup restarts the `filius-runner` user manager and its rootless Docker daemon, affecting applications too. Changed rootless setup inputs trigger managed build draining first. Stop unmanaged runners and schedule application downtime before delegation repairs; invoking `rootless-docker/setup.sh` directly bypasses the top-level maintenance transition. The built image is available only in the rootless daemon, not in finius's rootful Docker daemon. Resource-controller warnings can remain if the host does not use unified cgroup v2 or lacks those controllers.
 
 ### First use case: build this repository on demand
 
@@ -124,10 +124,9 @@ sudo journalctl -u filius-orchestrator.service -f
 
 A running service is not proof of successful GitHub registration: confirm `Listening for Jobs` in the journal and an online `docker-orchestrate` runner under this repository's **Settings → Actions → Runners**.
 
-Commit/push the changes yourself so `dispatch_runner.yml` is on the default branch. Update the server checkout as your normal admin account, and install the new runtime as root; push alone does not upgrade installed host files. For an existing HelloWorld installation, stop orchestration when no job is running, then install:
+Commit/push the changes yourself so `dispatch_runner.yml` is on the default branch. Update the server checkout as your normal admin account, and install the new runtime as root; push alone does not upgrade installed host files. Setup automatically stops/replaces existing services, including upgrades from the HelloWorld installation:
 
 ```sh
-sudo systemctl stop filius-orchestrator.service
 sudo /opt/filius/setup.sh
 ```
 
@@ -150,27 +149,23 @@ Expiry first removes `docker-build`, waits at least 60 seconds, and rechecks Git
 
 ### Update an installed dispatch runtime
 
-Unchanged setup reruns reuse installed state and the running broker without resetting grants/cooldowns or worker state. Changed launcher/image inputs refuse active services before daemon/image changes; the full runtime guard also checks installed configuration. A live managed build container prevents changed installation. Do not dispatch while updating. For later upgrades, run these as root:
+Update the checkout as your normal admin account, then run setup as **root**. It can change packages/accounts/services and rebuild images; no separate service-stop commands are needed:
 
 ```sh
-sudo systemctl stop filius-dispatch.path
-sudo systemctl status filius-dispatch.service --no-pager
-# Wait for any scan and orchestration job to finish before these stops.
-sudo systemctl stop filius-orchestrator.service filius-build-worker.service
-sudo bash /usr/local/lib/filius/host-control/drain.sh
-sudo systemctl stop filius-token-broker.service
 sudo /opt/filius/setup.sh
 ```
 
-Stopping build supervision leaves its launcher/container alone; the operator drain waits for active jobs or uses the same label/busy safety gate to retire an idle listener. It disables the worker without launching replacements. Setup restarts orchestration/request handling, not the drained build worker; manually dispatch when builds are queued again. Drain uses a transient `filius-build-drain.service`; its journal reports deferred conditions. Do not force-stop an uncertain/busy container to make installation pass.
+When runtime, installed settings or rootless setup inputs differ, setup pauses dispatch, waits for an in-flight host scan, stops orchestration/build supervision, and drains managed build work. Busy build jobs finish naturally; idle listeners use the existing label quarantine and busy checks. Setup waits rather than force-stopping uncertain/busy work. The broker stops only after draining. New runtime is installed, systemd reloaded, and the broker health-checked before orchestration/request handling and previously enabled build supervision resume. The original idle deadline is preserved; expired/never-enabled workers remain disabled.
 
-Stop any foreground `--all` worker and let its drain finish too. When upgrading
-from a pre-broker installation, skip the broker stop if that unit does not yet
-exist. Setup installs the broker unit/runtime idempotently and checks its local
-health endpoint before starting orchestration. It never writes token values to
-installed settings or resets persisted broker/worker state.
+Unchanged runtime/settings reuse running services and persisted state; broker grants/cooldowns are never reset by installation. Missing units on older installations need no manual handling. If installation fails, services may remain paused: fix the reported error and rerun setup. Drain progress is available through this read-only command as root:
 
-Stopping/restarting orchestration can cancel its own active job. Setup can change packages/accounts/services and rebuild images; cgroup-delegation changes can restart the daemon and affect applications. Schedule it with no active jobs. `sudo systemctl restart filius-orchestrator.service` restarts only installed runtime, not checkout changes.
+```sh
+sudo journalctl -u filius-setup-drain.service -f
+```
+
+Stop any foreground `--all` worker with Ctrl-C and let its drain finish first; setup does not kill a separately owned foreground process. Separate `--once` launches and the legacy pool are not managed by the upgrade drain. The operator `host-control/drain.sh` remains available for deliberately disabling a worker; unlike maintenance pause, it does not preserve enablement.
+
+**Do not dispatch during setup:** stopping orchestration can cancel its own active workflow. Cgroup-delegation repairs can restart the daemon and affect deployed applications; schedule those separately. `sudo systemctl restart filius-orchestrator.service` restarts only installed runtime, not checkout changes. Actual Linux/systemd upgrade operation still requires target-host verification.
 
 ### Start the legacy runner pool manually
 

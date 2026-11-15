@@ -89,37 +89,163 @@ umask 077
 printf '%s\n' "${github_url}" >"${REPO_FILE}"
 chmod 600 "${REPO_FILE}"
 
-# Check breaking launcher/image inputs before touching the daemon or images.
-for relative in build-runner/run.sh build-runner/run-once.sh build-runner/Dockerfile \
-  build-runner/runner-entrypoint.sh build-runner/runner-token.sh \
-  compose.runners.yaml host-control/controller.py token-broker/broker.py; do
-  if ! cmp -s "${SCRIPT_DIR}/${relative}" "${runtime_dir}/${relative}"; then
-    if [[ -f "${control_dir}/state/supervisor.lock" ]]; then
-      command -v flock >/dev/null || { echo "flock is required to check active build supervision." >&2; exit 1; }
-      if ! flock --nonblock "${control_dir}/state/supervisor.lock" true; then
-        echo "Stop/drain active build supervision before changing the runner/broker runtime; see README.md." >&2
-        exit 1
-      fi
+temporary_dir="$(mktemp -d)"
+maintenance_prepared=0
+cleanup_installation() {
+  local status=$?
+  rm -f "${temporary_dir}/orchestration.env" "${temporary_dir}/rootless-docker.conf"
+  rmdir "${temporary_dir}"
+  if ((status != 0 && maintenance_prepared)); then
+    echo "Setup did not finish; managed services may be paused. Fix the reported error and rerun setup.sh." >&2
+  fi
+}
+trap cleanup_installation EXIT
+
+unit_active() {
+  local state
+  state="$(systemctl show --property=ActiveState --value "$1" 2>/dev/null || true)"
+  [[ "${state}" == active || "${state}" == activating || "${state}" == deactivating ]]
+}
+stop_if_active() {
+  if unit_active "$1"; then
+    echo "Stopping $1 for installation..."
+    systemctl stop "$1"
+  fi
+}
+wait_for_unit() {
+  if unit_active "$1"; then
+    echo "Waiting for $1 to finish..."
+    while unit_active "$1"; do sleep 1; done
+  fi
+}
+prepare_upgrade() {
+  ((maintenance_prepared)) && return 0
+  maintenance_prepared=1
+  echo "Preparing automatic runner runtime upgrade..."
+  stop_if_active filius-dispatch.path
+  wait_for_unit filius-dispatch.service
+  stop_if_active filius-orchestrator.service
+  stop_if_active filius-build-worker.service
+  wait_for_unit filius-build-drain.service
+  wait_for_unit filius-setup-drain.service
+  if [[ -f "${control_dir}/state/supervisor.lock" ]]; then
+    command -v flock >/dev/null || { echo "flock is required to pause build supervision." >&2; exit 1; }
+    if ! flock --nonblock "${control_dir}/state/supervisor.lock" true; then
+      echo "A foreground --all worker is still running; use Ctrl-C and let its drain finish, then rerun setup.sh." >&2
+      exit 1
     fi
-    for unit in filius-orchestrator.service filius-build-worker.service filius-dispatch.path \
-      filius-dispatch.service filius-build-drain.service filius-token-broker.service; do
-      service_state="$(systemctl show --property=ActiveState --value "${unit}" 2>/dev/null || true)"
-      case "${service_state}" in
-        active|activating|deactivating)
-          echo "Stop ${unit} safely before changing the runner/broker runtime; see README.md." >&2
-          exit 1
-          ;;
-      esac
-    done
-    break
+  fi
+  if [[ -f "${control_dir}/state/worker.json" ]]; then
+    echo "Draining build work before installation; active jobs will not be cancelled."
+    systemd-run --quiet --wait --collect --unit=filius-setup-drain \
+      --property=Type=exec \
+      --property=EnvironmentFile=/etc/filius/orchestration.env \
+      --property=KillMode=process \
+      --property=UMask=0077 \
+      /usr/bin/python3 "${SCRIPT_DIR}/host-control/controller.py" pause
+  fi
+  stop_if_active filius-token-broker.service
+}
+
+command -v timeout >/dev/null || { echo "timeout is required for bounded orchestration shutdown." >&2; exit 1; }
+command -v flock >/dev/null || { echo "flock is required for managed build socket coordination." >&2; exit 1; }
+readonly orchestration_unit=filius-orchestrator.service
+readonly unit_file="/etc/systemd/system/${orchestration_unit}"
+readonly dropin_dir="${unit_file}.d"
+readonly orchestration_env=/etc/filius/orchestration.env
+
+write_setting() {
+  local key="$1" value="$2"
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "Orchestration configuration must not contain line breaks: ${key}" >&2
+    exit 1
+  fi
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "${key}" "${value}"
+}
+write_runtime_settings() {
+  {
+    write_setting GITHUB_URL "${github_url}"
+    write_setting GITHUB_PAT_FILE "${TOKEN_FILE}"
+    write_setting RUNNER_DOCKER_USER "${RUNNER_USER}"
+    write_setting RUNNER_HOME "${RUNNER_HOME}"
+    write_setting DOCKER_SOCKET "${docker_socket}"
+    write_setting FILIUS_CONTROL_DIR "${control_dir}"
+    write_setting FILIUS_ELIGIBILITY_FILE /etc/filius/eligible-repositories.json
+    write_setting FILIUS_TOKEN_BROKER_DIR "${control_dir}/token-broker"
+  } >"${temporary_dir}/orchestration.env"
+  printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' \
+    "${runner_uid}" "${runner_uid}" >"${temporary_dir}/rootless-docker.conf"
+}
+# An absent account necessarily needs installation; regenerate with its real UID below.
+runner_uid="$(id -u "${RUNNER_USER}" 2>/dev/null || true)"
+docker_socket="/run/user/${runner_uid:-pending}/docker.sock"
+write_runtime_settings
+
+runtime_sources=(
+  "${SCRIPT_DIR}/build-runner/run-once.sh"
+  "${SCRIPT_DIR}/build-runner/run.sh"
+  "${SCRIPT_DIR}/build-runner/Dockerfile"
+  "${SCRIPT_DIR}/build-runner/runner-entrypoint.sh"
+  "${SCRIPT_DIR}/build-runner/runner-token.sh"
+  "${SCRIPT_DIR}/orchestration-runner/run-once.sh"
+  "${SCRIPT_DIR}/compose.runners.yaml"
+  "${SCRIPT_DIR}/orchestration-runner/filius-orchestrator.service"
+  "${temporary_dir}/orchestration.env"
+  "${temporary_dir}/rootless-docker.conf"
+  "${SCRIPT_DIR}/eligible-repositories.json"
+  "${SCRIPT_DIR}/host-control/controller.py"
+  "${SCRIPT_DIR}/host-control/drain.sh"
+  "${SCRIPT_DIR}/host-control/filius-dispatch.path"
+  "${SCRIPT_DIR}/host-control/filius-dispatch.service"
+  "${SCRIPT_DIR}/host-control/filius-build-worker.service"
+  "${temporary_dir}/rootless-docker.conf"
+  "${temporary_dir}/rootless-docker.conf"
+  "${SCRIPT_DIR}/token-broker/broker.py"
+  "${SCRIPT_DIR}/token-broker/filius-token-broker.service"
+  "${SCRIPT_DIR}/rootless-docker/setup.sh"
+  "${SCRIPT_DIR}/rootless-docker/delegate-cgroups.sh"
+)
+runtime_targets=(
+  "${runtime_dir}/build-runner/run-once.sh"
+  "${runtime_dir}/build-runner/run.sh"
+  "${runtime_dir}/build-runner/Dockerfile"
+  "${runtime_dir}/build-runner/runner-entrypoint.sh"
+  "${runtime_dir}/build-runner/runner-token.sh"
+  "${runtime_dir}/orchestration-runner/run-once.sh"
+  "${runtime_dir}/compose.runners.yaml"
+  "${unit_file}"
+  "${orchestration_env}"
+  "${dropin_dir}/rootless-docker.conf"
+  /etc/filius/eligible-repositories.json
+  "${runtime_dir}/host-control/controller.py"
+  "${runtime_dir}/host-control/drain.sh"
+  /etc/systemd/system/filius-dispatch.path
+  /etc/systemd/system/filius-dispatch.service
+  /etc/systemd/system/filius-build-worker.service
+  /etc/systemd/system/filius-dispatch.service.d/rootless-docker.conf
+  /etc/systemd/system/filius-build-worker.service.d/rootless-docker.conf
+  "${runtime_dir}/token-broker/broker.py"
+  /etc/systemd/system/filius-token-broker.service
+  "${runtime_dir}/rootless-docker/setup.sh"
+  "${runtime_dir}/rootless-docker/delegate-cgroups.sh"
+)
+runtime_changed=0
+for i in "${!runtime_sources[@]}"; do
+  if ! cmp -s "${runtime_sources[$i]}" "${runtime_targets[$i]}"; then
+    runtime_changed=1
   fi
 done
+if ((runtime_changed)); then
+  prepare_upgrade
+fi
 
 echo "Setting up rootless Docker..."
 bash "${SCRIPT_DIR}/rootless-docker/setup.sh"
-
 runner_uid="$(id -u "${RUNNER_USER}")"
 docker_socket="/run/user/${runner_uid}/docker.sock"
+write_runtime_settings
 if [[ ! -S "${docker_socket}" ]]; then
   echo "Rootless Docker socket not found: ${docker_socket}" >&2
   exit 1
@@ -153,116 +279,16 @@ runuser -u "${RUNNER_USER}" -- env \
   FILIUS_DEPLOYMENTS_DIR="${RUNNER_HOME}/deployments" \
   docker compose --project-name filius-runners --file "${SCRIPT_DIR}/compose.runners.yaml" config --quiet
 
-runuser -u "${RUNNER_USER}" -- env \
-  HOME="${RUNNER_HOME}" \
-  USER="${RUNNER_USER}" \
-  LOGNAME="${RUNNER_USER}" \
-  DOCKER_HOST="unix://${docker_socket}" \
-  docker image inspect filius-builder:local >/dev/null
-runuser -u "${RUNNER_USER}" -- env \
-  HOME="${RUNNER_HOME}" \
-  USER="${RUNNER_USER}" \
-  LOGNAME="${RUNNER_USER}" \
-  DOCKER_HOST="unix://${docker_socket}" \
-  docker image inspect filius-deployer:local >/dev/null
-
-command -v timeout >/dev/null || { echo "timeout is required for bounded orchestration shutdown." >&2; exit 1; }
-command -v flock >/dev/null || { echo "flock is required for managed build socket coordination." >&2; exit 1; }
-readonly orchestration_unit=filius-orchestrator.service
-readonly unit_file="/etc/systemd/system/${orchestration_unit}"
-readonly dropin_dir="${unit_file}.d"
-readonly orchestration_env=/etc/filius/orchestration.env
-temporary_dir="$(mktemp -d)"
-cleanup_installation() {
-  rm -f "${temporary_dir}/orchestration.env" "${temporary_dir}/rootless-docker.conf"
-  rmdir "${temporary_dir}"
-}
-trap cleanup_installation EXIT
-
-write_setting() {
-  local key="$1" value="$2"
-  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
-    echo "Orchestration configuration must not contain line breaks: ${key}" >&2
-    exit 1
-  fi
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '%s="%s"\n' "${key}" "${value}"
-}
-{
-  write_setting GITHUB_URL "${github_url}"
-  write_setting GITHUB_PAT_FILE "${TOKEN_FILE}"
-  write_setting RUNNER_DOCKER_USER "${RUNNER_USER}"
-  write_setting RUNNER_HOME "${RUNNER_HOME}"
-  write_setting DOCKER_SOCKET "${docker_socket}"
-  write_setting FILIUS_CONTROL_DIR "${control_dir}"
-  write_setting FILIUS_ELIGIBILITY_FILE /etc/filius/eligible-repositories.json
-  write_setting FILIUS_TOKEN_BROKER_DIR "${control_dir}/token-broker"
-} >"${temporary_dir}/orchestration.env"
-printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' \
-  "${runner_uid}" "${runner_uid}" >"${temporary_dir}/rootless-docker.conf"
-
-runtime_sources=(
-  "${SCRIPT_DIR}/build-runner/run-once.sh"
-  "${SCRIPT_DIR}/build-runner/run.sh"
-  "${SCRIPT_DIR}/build-runner/Dockerfile"
-  "${SCRIPT_DIR}/build-runner/runner-entrypoint.sh"
-  "${SCRIPT_DIR}/build-runner/runner-token.sh"
-  "${SCRIPT_DIR}/orchestration-runner/run-once.sh"
-  "${SCRIPT_DIR}/compose.runners.yaml"
-  "${SCRIPT_DIR}/orchestration-runner/filius-orchestrator.service"
-  "${temporary_dir}/orchestration.env"
-  "${temporary_dir}/rootless-docker.conf"
-  "${SCRIPT_DIR}/eligible-repositories.json"
-  "${SCRIPT_DIR}/host-control/controller.py"
-  "${SCRIPT_DIR}/host-control/drain.sh"
-  "${SCRIPT_DIR}/host-control/filius-dispatch.path"
-  "${SCRIPT_DIR}/host-control/filius-dispatch.service"
-  "${SCRIPT_DIR}/host-control/filius-build-worker.service"
-  "${temporary_dir}/rootless-docker.conf"
-  "${temporary_dir}/rootless-docker.conf"
-  "${SCRIPT_DIR}/token-broker/broker.py"
-  "${SCRIPT_DIR}/token-broker/filius-token-broker.service"
-)
-runtime_targets=(
-  "${runtime_dir}/build-runner/run-once.sh"
-  "${runtime_dir}/build-runner/run.sh"
-  "${runtime_dir}/build-runner/Dockerfile"
-  "${runtime_dir}/build-runner/runner-entrypoint.sh"
-  "${runtime_dir}/build-runner/runner-token.sh"
-  "${runtime_dir}/orchestration-runner/run-once.sh"
-  "${runtime_dir}/compose.runners.yaml"
-  "${unit_file}"
-  "${orchestration_env}"
-  "${dropin_dir}/rootless-docker.conf"
-  /etc/filius/eligible-repositories.json
-  "${runtime_dir}/host-control/controller.py"
-  "${runtime_dir}/host-control/drain.sh"
-  /etc/systemd/system/filius-dispatch.path
-  /etc/systemd/system/filius-dispatch.service
-  /etc/systemd/system/filius-build-worker.service
-  /etc/systemd/system/filius-dispatch.service.d/rootless-docker.conf
-  /etc/systemd/system/filius-build-worker.service.d/rootless-docker.conf
-  "${runtime_dir}/token-broker/broker.py"
-  /etc/systemd/system/filius-token-broker.service
-)
-runtime_changed=0
-for i in "${!runtime_sources[@]}"; do
-  if ! cmp -s "${runtime_sources[$i]}" "${runtime_targets[$i]}"; then
-    runtime_changed=1
-  fi
+for image in filius-builder:local filius-deployer:local; do
+  runuser -u "${RUNNER_USER}" -- env \
+    HOME="${RUNNER_HOME}" \
+    USER="${RUNNER_USER}" \
+    LOGNAME="${RUNNER_USER}" \
+    DOCKER_HOST="unix://${docker_socket}" \
+    docker image inspect "${image}" >/dev/null
 done
+
 if ((runtime_changed)); then
-  for unit in "${orchestration_unit}" filius-build-worker.service filius-dispatch.path filius-dispatch.service filius-build-drain.service filius-token-broker.service; do
-    service_state="$(systemctl show --property=ActiveState --value "${unit}" 2>/dev/null || true)"
-    case "${service_state}" in
-      active|activating|deactivating)
-        echo "Runtime changes require an explicit stop of ${unit} before installation." >&2
-        echo "Pause dispatch, stop supervision when safe, and wait for build containers to finish; see README.md." >&2
-        exit 1
-        ;;
-    esac
-  done
   if [[ -f "${control_dir}/state/worker.json" ]]; then
     GITHUB_URL="${github_url}" DOCKER_SOCKET="${docker_socket}" \
       FILIUS_CONTROL_DIR="${control_dir}" FILIUS_ELIGIBILITY_FILE="${SCRIPT_DIR}/eligible-repositories.json" \
@@ -273,7 +299,7 @@ fi
 echo "Installing the root-owned orchestration and demand-enabled build runtime..."
 install -d -o root -g root -m 755 "${runtime_dir}" \
   "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${runtime_dir}/host-control" \
-  "${runtime_dir}/token-broker" "${dropin_dir}" \
+  "${runtime_dir}/token-broker" "${runtime_dir}/rootless-docker" "${dropin_dir}" \
   /etc/systemd/system/filius-dispatch.service.d /etc/systemd/system/filius-build-worker.service.d
 install -d -o root -g root -m 700 /etc/filius
 if [[ -L "${control_dir}" ]]; then
@@ -304,6 +330,12 @@ for i in "${!runtime_sources[@]}"; do
   fi
 done
 systemctl daemon-reload
+for unit in filius-orchestrator.service filius-build-worker.service \
+  filius-dispatch.path filius-dispatch.service filius-token-broker.service; do
+  if systemctl is-failed --quiet "${unit}"; then
+    systemctl reset-failed "${unit}"
+  fi
+done
 systemctl enable --now filius-token-broker.service
 broker_ready=0
 for ((attempt=0; attempt<30; attempt++)); do
@@ -325,6 +357,11 @@ if ! systemctl is-active --quiet "${orchestration_unit}"; then
   echo "Orchestration service is not active; inspect: sudo journalctl -u ${orchestration_unit}" >&2
   exit 1
 fi
+if flock --nonblock "${control_dir}/state/supervisor.lock" true; then
+  GITHUB_URL="${github_url}" FILIUS_CONTROL_DIR="${control_dir}" \
+    FILIUS_ELIGIBILITY_FILE=/etc/filius/eligible-repositories.json \
+    /usr/bin/python3 "${runtime_dir}/host-control/controller.py" resume
+fi
 
 echo
 echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
@@ -332,5 +369,5 @@ echo "The orchestration service is enabled and active. GitHub registration may s
 echo "The local one-shot token broker is ready; its PAT stays host-only."
 echo "Check readiness with: sudo journalctl -u ${orchestration_unit} -f"
 echo "Once the runner is online, manually dispatch dispatch_runner.yml to start/reuse one build worker for queued build work."
-echo "Build workers are not started by setup; previously enabled state is retained for boot recovery."
+echo "Previously enabled build supervision is resumed; never-enabled or expired workers stay disabled."
 echo "The legacy build/deployment pool has not been started."

@@ -6,14 +6,17 @@ The first eligible, demand-driven build slice was committed at `999e879`
 (`implement run start`), building on `b943a5d`. A reported dispatch failure
 occurred before request submission because the container lacked its control
 directories, consistent with an older installed host runtime. That preflight
-follow-up was committed at `90f3452`. Current uncommitted changes add the
-host-only one-shot token broker, runner startup client and `run.sh` modes.
+follow-up was committed at `90f3452`. The host-only one-shot token broker,
+runner startup client and `run.sh` modes were committed at `6dd22a9`.
+Current uncommitted changes automate setup's service stop/drain/install/restart
+transition, replacing manual-stop prerequisites and preserving worker state.
 Server installation/repair has not been performed from this local session.
 
 This describes source, not verified server operation. Local standard-library
 mocked tests cover discovery, request isolation, singleton activation, restart
-state, idle expiry and operator drain. Shell/YAML/embedded workflow syntax and
-diff whitespace are checked locally. No real GitHub requests, Docker operations,
+state, idle expiry, operator drain and automatic upgrade transitions.
+Shell/YAML/embedded workflow syntax and diff whitespace are checked locally.
+No real GitHub requests, Docker operations,
 host setup, services, workflow execution or account changes were performed.
 macOS Bash 3.2 parsing is not Bash 4+ Linux runtime verification. ShellCheck,
 actionlint and newer Bash were unavailable.
@@ -22,7 +25,7 @@ Linux Mint/systemd integration, online registration, actual build pickup,
 reboot recovery and near-deadline assignment/drain behavior remain unverified.
 Mocks do not establish an atomic GitHub drain guarantee.
 
-## Current token-broker worktree slice
+## Token broker and automatic upgrades
 
 - `token-broker/broker.py` and its systemd unit provide a local Unix-socket
   registration service. Only this root host service reads the PAT for runner
@@ -48,10 +51,14 @@ Mocks do not establish an atomic GitHub drain guarantee.
   idle/drain supervision or introduce a persistent multi-job runner.
 - Setup installs root-owned broker/runtime files and private directories,
   enables/starts the broker and waits for Unix-socket health before starting
-  orchestration. Unchanged reruns preserve grants/cooldowns/worker state;
-  changed launcher/image inputs require stopped services before daemon/image
-  changes. Root setup/actual idempotent host runs have not been executed here.
-- Local verification passes 57 focused tests (including an in-process Unix
+  orchestration. Changed runtime/settings/rootless inputs automatically pause
+  dispatch, stop services and drain managed build jobs before daemon/image
+  changes. Maintenance preserves enablement and absolute idle deadlines,
+  stops the broker last, then resumes previously enabled supervision after
+  installation. Unchanged runtime reuses running services; grants/cooldowns
+  remain intact. Failure leaves a clear rerun instruction, not a forced stop.
+  Root setup/actual idempotent host runs have not been executed here.
+- Local verification passes 68 focused tests (including an in-process Unix
   socket with mocked GitHub), plus shell/YAML/Python syntax and diff checks.
   No real Docker build, systemd startup or server installation was performed.
 
@@ -59,7 +66,8 @@ Mocks do not establish an atomic GitHub drain guarantee.
 
 - Root `setup.sh` prepares the dedicated rootless daemon, builds the pinned
   runner images and installs root-owned runtime/configuration/systemd units.
-  It starts permanent orchestration and request handling, not workload workers.
+  It starts permanent orchestration and request handling and resumes previously
+  enabled build supervision, without enabling new/expired workload workers.
 - `eligible-repositories.json` lists only `https://github.com/WSiebelder/filius`.
   Capacity is fixed at one managed build worker. Other repositories, duplicates,
   extra settings and a different control URL fail validation.
@@ -93,6 +101,10 @@ Mocks do not establish an atomic GitHub drain guarantee.
 - Operator drain supports installation updates: stopping build supervision
   leaves the shared launcher/container running; drain waits for a busy job or
   uses the same idle safety gate, then disables the worker without replacements.
+  Setup's maintenance pause uses that safety gate but retains prior enablement
+  and remaining idle budget. Foreground `--all` still needs its owner's Ctrl-C;
+  separate manual `--once`/legacy runners are outside managed upgrade draining.
+  Orchestration's own active workflow can be cancelled by its service stop.
 
 The eight-hour deadline is a safety-first goal, not justification to kill
 uncertain work. GitHub label removal and subsequent observations are not a
@@ -125,7 +137,7 @@ deployment job -> persistent Compose project -> same rootless daemon
 | PAT | `/etc/filius/github-token`, root-owned mode 0600; fine-grained repository Administration read/write and Actions read. Never mounted/passed to jobs. |
 | Saved control URL | `/etc/filius/repository-url`; changing it alone does not update installed runtime. |
 | Installed configuration | `/etc/filius/orchestration.env` and `/etc/filius/eligible-repositories.json`, root-owned mode 0600, no token values. |
-| Installed runtime | `/usr/local/lib/filius`; systemd units/drop-ins under `/etc/systemd/system`. Active runtime or a live managed build container prevents changed installation. |
+| Installed runtime | `/usr/local/lib/filius`; systemd units/drop-ins under `/etc/systemd/system`. Changed setup owns service stop/drain/install/restart; failed drains/live managed containers block installation. |
 | Control parent | `/var/lib/filius-control`, root-owned, mode 0710 with dedicated daemon group traversal; no other-user access. |
 | Requests/results | Separate root-owned directories; requests mode 1733 accommodates mapped job UID; results mode 0755 with read-only container bind mount and host-written summaries. |
 | Lifecycle/locks | `/var/lib/filius-control/state`, root-private mode 0700, atomic durable JSON and file locks. Invalid request directories are quarantined here without traversing contents. |
@@ -156,10 +168,10 @@ and daemon, affecting jobs/apps.
 | --- | --- |
 | `eligible-repositories.json` | First eligible target, one-worker boundary enforced by host logic. |
 | `host-control/controller.py`, `host-control/*.service`, `host-control/*.path`, `host-control/drain.sh` | Constrained request processing, GitHub discovery, persisted build supervision/expiry and operator drain. |
-| `setup.sh` | Python prerequisite, eligibility/Actions checks, root-owned runtime/control installation, active-update guards, path/orchestration enablement and workload boot recovery. |
+| `setup.sh` | Python prerequisite, eligibility/Actions checks, root-owned runtime/control installation, automatic service maintenance, path/orchestration enablement and enabled-worker recovery. |
 | `compose.runners.yaml` | Narrow writable request and read-only result mounts for orchestration; existing build/deploy socket/mount behavior retained. |
 | `.github/workflows/dispatch_runner.yml` | Manual request/bounded result reporting and an early missing-mount diagnostic; no push/schedule trigger or extra token permissions. |
-| `tests/test_host_control.py` | Focused mocked tests, including missing/present control directory preflight; no live API/Docker/systemd access. |
+| `tests/test_host_control.py` | Focused mocked tests, including control directory preflight, upgrade ordering/failure/idempotence and preserved worker enablement/deadlines; no live API/Docker/systemd access. |
 | `README.md`, `STATE.md`, `BACKLOG.md`, `AGENTS.md` | Current implementation, installation sequence, safety constraints and remaining scope. |
 
 `runner-pool.sh` and the smoke-test workflow remain unchanged. The runner-image
