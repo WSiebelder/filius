@@ -5,9 +5,10 @@
 The first eligible, demand-driven build slice was committed at `999e879`
 (`implement run start`), building on `b943a5d`. A reported dispatch failure
 occurred before request submission because the container lacked its control
-directories, consistent with an older installed host runtime. The current
-uncommitted follow-up adds a clear missing-mount preflight and focused tests;
-server installation/repair has not been performed from this local session.
+directories, consistent with an older installed host runtime. That preflight
+follow-up was committed at `90f3452`. Current uncommitted changes add the
+host-only one-shot token broker, runner startup client and `run.sh` modes.
+Server installation/repair has not been performed from this local session.
 
 This describes source, not verified server operation. Local standard-library
 mocked tests cover discovery, request isolation, singleton activation, restart
@@ -20,6 +21,39 @@ actionlint and newer Bash were unavailable.
 Linux Mint/systemd integration, online registration, actual build pickup,
 reboot recovery and near-deadline assignment/drain behavior remain unverified.
 Mocks do not establish an atomic GitHub drain guarantee.
+
+## Current token-broker worktree slice
+
+- `token-broker/broker.py` and its systemd unit provide a local Unix-socket
+  registration service. Only this root host service reads the PAT for runner
+  startup; no TCP management API, certificates or unmount privileges are added.
+- Root launchers authorize a random instance/name/repository/role grant valid
+  for five minutes. Startup consumes it before requesting a registration token,
+  including failed/lost requests. Duplicates are rejected, and ten GitHub
+  attempts per 60 seconds is enforced in persistent host state across launches
+  and broker restarts. Tokens are never persisted in that state or logged.
+- `build-runner/run.sh --once URL` launches a fresh one-job Compose container.
+  `--all` supervises the existing single build worker in the foreground;
+  `--service` enables/reuses its existing systemd service. Manual long-running
+  modes may start without queued demand, but retain eight-hour idle expiry.
+  Foreground interrupts drain without signalling the job's process group.
+- The Dockerfile includes `runner-token.sh`; image startup gets a token via
+  the broker and removes startup variables before the job. Compose now passes
+  a runner instance identifier, not a registration token. All roles mount the
+  broker directory read-only. UID 1001 and ephemeral registration are retained.
+- A legacy `RUNNER_TOKEN` fallback with warning permits image-first upgrades
+  from old installed launchers, but is never used after a broker failure.
+- `run-once.sh` is a compatibility shim; managed/deployment/orchestration
+  callers use the new launcher. The broker does not replace existing host
+  idle/drain supervision or introduce a persistent multi-job runner.
+- Setup installs root-owned broker/runtime files and private directories,
+  enables/starts the broker and waits for Unix-socket health before starting
+  orchestration. Unchanged reruns preserve grants/cooldowns/worker state;
+  changed launcher/image inputs require stopped services before daemon/image
+  changes. Root setup/actual idempotent host runs have not been executed here.
+- Local verification passes 57 focused tests (including an in-process Unix
+  socket with mocked GitHub), plus shell/YAML/Python syntax and diff checks.
+  No real Docker build, systemd startup or server installation was performed.
 
 ## Implemented first-repository path
 
@@ -71,7 +105,7 @@ explicitly role-labelled workflows belong here.
 ```text
 root setup -> rootless account/daemon + images + installed runtime
   -> boot-persistent filius-orchestrator.service
-     -> fresh token -> one socket-free docker-orchestrate runner
+     -> startup token broker -> Docker-socket-free docker-orchestrate runner
      -> manual dispatch writes request, reads result, exits
   -> filius-dispatch.path -> host-only filius-dispatch.service
      -> installed allowlist + host PAT -> this repository's runs/jobs
@@ -96,7 +130,8 @@ deployment job -> persistent Compose project -> same rootless daemon
 | Requests/results | Separate root-owned directories; requests mode 1733 accommodates mapped job UID; results mode 0755 with read-only container bind mount and host-written summaries. |
 | Lifecycle/locks | `/var/lib/filius-control/state`, root-private mode 0700, atomic durable JSON and file locks. Invalid request directories are quarantined here without traversing contents. |
 | Host Docker socket | `/run/user/<filius-runner-uid>/docker.sock`, never the rootful host socket. |
-| Container Docker socket | Only build/deploy mount that rootless source at container `/var/run/docker.sock`. Orchestration gets only request/result mounts. |
+| Container Docker socket | Only build/deploy mount that rootless source at container `/var/run/docker.sock`. Orchestration gets request/result and broker mounts only. |
+| Token socket | `/var/lib/filius-control/token-broker/broker.sock`, mounted at `/filius-token/broker.sock`; loop guard ledger stays in root-private `state/token-broker.json`. |
 | Deployment projects | `/var/lib/filius-runner/deployments`, same path in deployment container and daemon host. No shipped automated deployment workflow. |
 
 Root-owned installed configuration is authoritative. Request names/payloads
@@ -127,9 +162,9 @@ and daemon, affecting jobs/apps.
 | `tests/test_host_control.py` | Focused mocked tests, including missing/present control directory preflight; no live API/Docker/systemd access. |
 | `README.md`, `STATE.md`, `BACKLOG.md`, `AGENTS.md` | Current implementation, installation sequence, safety constraints and remaining scope. |
 
-`runner-pool.sh`, the two build workflows, runner images/entrypoint and shared
-launcher are unchanged in this slice. Do not combine the managed worker with
-the legacy fixed pool if expecting capacity one.
+`runner-pool.sh` and the smoke-test workflow remain unchanged. The runner-image
+workflow now includes the new startup client as a build input. Do not combine
+the managed worker with the legacy fixed pool if expecting capacity one.
 
 ## History and remaining destination
 

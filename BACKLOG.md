@@ -8,6 +8,12 @@ current slice adds demand-driven discovery and one expiring build worker for
 Multi-repository scheduling and application delivery remain future work;
 source/mock verification is not verified server operation.
 
+The current broker slice adds a host-only Unix token service, per-launch
+one-shot grants, persisted request cooldowns and `run.sh --once|--all|--service`.
+The guard targets accidental loops in trusted workflows, not enterprise
+isolation. Manual `--all`/`--service` are explicit operator starts; dispatch
+remains demand-only. Existing host single-worker/idle supervision is retained.
+
 The destination is an idempotent `setup.sh` for a headless Ubuntu-based Linux
 Mint host, manually requested queue discovery, repository-scoped build runners,
 one central deployment worker, and reusable Docker build/test workflows. Keep
@@ -146,8 +152,8 @@ observations and safety-first label quarantine. Restart adopts a live managed
 container. Operator drain waits for busy work. Mocks cover these transitions;
 real assignment/drain guarantees and full crash recovery are not established.
 
-**Evidence:** `build-runner/run-once.sh:40-70,93-107` adds shared socket state but
-uses second-based names; `build-runner/runner-entrypoint.sh:32` uses `--replace`.
+**Evidence:** `build-runner/run.sh` coordinates socket state and now uses UUID
+names by default; `build-runner/runner-entrypoint.sh` retains `--replace`.
 `runner-pool.sh:1-54` is the legacy fixed foreground pool, without demand-driven
 lifecycle or idle expiry. Its separate detached dashboard rewrite was discarded.
 
@@ -177,6 +183,9 @@ after forced termination/socket replacement, and generalized worker recovery.
 The current 60-second quarantine/observation gate is not a documented atomic
 GitHub drain. API uncertainty must defer cleanup. Idle expiry is eight hours;
 ordinary idle failure recovery must not reset its persisted deadline.
+Token broker/grant restarts, persisted cooldowns and image-first compatibility
+have local mocked coverage; actual socket UID mapping and upgrade/reboot
+behavior still need authorized host acceptance.
 
 ## B04 - Integrate headless boot-persistent supervision
 
@@ -430,3 +439,6 @@ actually verified; do not substitute syntax checks for host lifecycle evidence.
 boot/upgrade/socket recovery and workflow pickup; broaden tests only with the
 corresponding new behavior. No commands should execute merely because they
 appear in the runbook.
+Include repeat broker installation without ledger reset, one-shot rejection
+after restart, request cooldown across new instances and foreground/background
+operator modes in that host acceptance.

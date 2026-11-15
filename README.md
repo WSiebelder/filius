@@ -6,7 +6,7 @@ Self-hosted GitHub Actions runner tools for finius. Setup builds local images an
 
 1. `rootless-docker/setup.sh` creates the locked `filius-runner` Linux account, its private home, and the persistent deployment directory, then configures a rootless Docker daemon for it.
 2. `build-runner/build.sh` builds `filius-builder:local`; `deployment-runner/build.sh` adds Docker Compose and builds `filius-deployer:local` on the same daemon.
-3. `setup.sh` installs a root-owned orchestration runtime and enables/starts `filius-orchestrator.service`. Each service cycle uses the host-only PAT to request a fresh, short-lived registration token, then starts one ephemeral orchestration runner. The service repeats after each job or failure and starts at boot.
+3. `setup.sh` installs root-owned runtime, starts the local token broker and enables/starts `filius-orchestrator.service`. Each launch authorizes a one-shot startup grant; the container requests its short-lived registration token from the host broker. Orchestration repeats after jobs/failures and starts at boot.
 4. Manual `dispatch_runner` writes an empty run/attempt-specific request. A systemd path/oneshot host service uses the host-only PAT to inspect queued jobs in queued and active runs. Only installed eligible targets and supported build labels qualify; no work is a successful no-op.
 5. Matching work enables one managed build worker. It requests a fresh registration token per ephemeral runner and cycles after each job. Eight continuous idle hours trigger safety-gated retirement; busy/uncertain runners are left alone. Orchestration never expires.
 6. The separate legacy `runner-pool.sh` starts two build workers and one deployment worker. Setup does not start it; do not run it alongside the managed build worker if you want a one-worker limit. Applications started by deployment jobs outlive the runner.
@@ -25,7 +25,7 @@ The orchestration runner has labels `self-hosted`, `linux`, `x64`, and `docker-o
 - `curl`, `jq`, Python 3.8+, `timeout` and `flock` on finius. Setup installs missing curl/jq/Python; Python host logic uses only the standard library.
 - A private GitHub repository for the runner to serve. Only run trusted workflows on a self-hosted runner.
 
-Host launchers use the rootless daemon socket rather than the host's `/var/run/docker.sock`. Before mounting it into a build/deployment container, `run-once.sh` coordinates temporary socket accessibility and restoration across active consumers. Orchestration does not mount it or relax its mode. The socket remains under systemd's private `/run/user/<UID>` directory on the host. Rootless Docker is not a VM: jobs share finius's kernel and resources. Runner labels guide job selection, not isolation from trusted workflows intentionally using default self-hosted labels. Docker documents [rootless mode](https://docs.docker.com/engine/security/rootless/) and its [security model](https://docs.docker.com/engine/security/).
+Host launchers use the rootless daemon socket rather than the host's `/var/run/docker.sock`. Before mounting it into a build/deployment container, `build-runner/run.sh` coordinates temporary socket accessibility and restoration across active consumers. Orchestration does not mount the Docker socket or relax its mode. The socket remains under systemd's private `/run/user/<UID>` directory on the host. Rootless Docker is not a VM: jobs share finius's kernel and resources. Runner labels guide job selection, not isolation from trusted workflows intentionally using default self-hosted labels. Docker documents [rootless mode](https://docs.docker.com/engine/security/rootless/) and its [security model](https://docs.docker.com/engine/security/).
 
 The deployment runner controls only this rootless daemon, so its containers are separate from anything started by finius's rootful Docker daemon. Rootless Docker also restricts binding privileged ports such as 80 and 443; publish an unprivileged host port (for example, 8080) and route traffic to it separately if needed. See [Docker's rootless mode](https://docs.docker.com/engine/security/rootless/).
 
@@ -44,9 +44,70 @@ The installer checks prerequisites, then prompts for a fine-grained PAT if `/etc
 
 Select `https://github.com/WSiebelder/filius`, not an account/organization URL. It is saved in `/etc/filius/repository-url` and offered on reruns. This first-use-case implementation rejects other control repositories.
 
-The PAT stays outside the checkout with root-only permissions. Setup checks registration and Actions access, prepares rootless Docker, builds both images, installs the runtime and enables/starts orchestration and the request path. It enables build supervision for boot recovery but does not start a build worker itself. Never-enabled/expired workers stay disabled; previously enabled workers retain state on reboot.
+The PAT stays outside the checkout with root-only permissions. Setup checks registration and Actions access, prepares rootless Docker, builds both images, installs the runtime and enables/starts the token broker, orchestration and request path. It enables build supervision for boot recovery but does not start a build worker itself. Never-enabled/expired workers stay disabled; previously enabled workers retain state on reboot.
 
-Services execute root-owned runtime snapshots under `/usr/local/lib/filius`, not mutable checkout scripts. `/etc/filius/orchestration.env` and the installed `/etc/filius/eligible-repositories.json` are mode 0600; neither contains tokens. `/var/lib/filius-control/state` is root-private and holds locks/lifecycle state. Its parent permits traversal only by root and the dedicated daemon account. Orchestration mounts only `requests` writable and `results` read-only at `/filius-control/`; it gets no PAT, host scripts, deployment files or Docker socket. Requests cannot choose URLs, capacity or commands; results contain non-secret summaries.
+Services execute root-owned runtime snapshots under `/usr/local/lib/filius`, not mutable checkout scripts. `/etc/filius/orchestration.env` and installed eligibility are mode 0600; neither contains tokens. `/var/lib/filius-control/state` is root-private and holds locks, lifecycle and broker guard state. Its parent permits traversal only by root and the dedicated daemon account. Orchestration mounts requests writable, results read-only, and the token-broker directory read-only; it gets no PAT, host scripts, deployment files or Docker socket. Scan requests cannot choose URLs, capacity or commands.
+
+### One-shot host token broker
+
+`token-broker/` contains the Python standard-library broker and its
+`filius-token-broker.service`. It listens only on
+`/var/lib/filius-control/token-broker/broker.sock`, mounted into runners as
+`/filius-token/broker.sock`; there is no TCP endpoint.
+
+The root launcher preauthorizes a random runner instance for the installed
+repository, name and role. `runner-token.sh`, included in the image, exchanges
+that instance for a registration token once at startup. The broker reads the
+host PAT; neither the PAT nor the registration token is put in the new Compose
+container environment. Only the instance identifier is passed there.
+
+Each startup grant expires after five minutes and is consumed **before**
+contacting GitHub, even if the request fails or its response is lost. No
+automatic client retry occurs. The host launcher revokes the grant when its
+container exits. Failed startup needs a fresh launch, not a second request from
+the same container. A persisted limit of ten GitHub registration attempts per
+60 seconds, shared across launches/roles, curbs accidental restart loops.
+Restarting the broker or rerunning setup does not reset that counter.
+
+The socket stays mounted; no unmount privileges, certificates or privileged
+bootstrap are required. This is a practical loop guard for trusted workflows,
+not isolation from jobs that already control the shared Docker daemon.
+
+For image-first upgrades only, the entrypoint still accepts a legacy
+`RUNNER_TOKEN` when no broker instance was supplied and emits a warning. A
+broker-authorized startup never falls back to an inherited token on failure.
+Install the host runtime to use the one-shot guard; rebuilding the image alone
+does not enable it.
+
+### Runner command modes
+
+After installation, run these as **root**; they can register/start workers:
+
+```sh
+sudo bash /opt/filius/build-runner/run.sh --once https://github.com/WSiebelder/filius
+sudo bash /opt/filius/build-runner/run.sh --all https://github.com/WSiebelder/filius
+sudo bash /opt/filius/build-runner/run.sh --service https://github.com/WSiebelder/filius
+```
+
+| Mode | Behavior |
+| --- | --- |
+| `--once` | Wait for/run one job in a fresh removable Compose container, then exit. |
+| `--all` | Run the managed build worker in the foreground, cycling fresh containers until eight continuous idle hours; Ctrl-C begins a drain rather than cancelling the active job. |
+| `--service` | Enable/start or reuse the same installed build worker in the background through `filius-build-worker.service`. |
+
+`--all`/`--service` are explicit operator starts: they can wait for work even if
+none is queued. They share the installed one-worker state and eight-hour idle
+policy; they do not create a second pool. `--all` refuses an already active
+supervisor. Manual dispatch remains demand-only. `--once` is a separate manual
+one-job launch, so avoid combining it/the legacy pool with managed supervision
+when expecting capacity one. All broker-backed modes currently require this
+installed eligible repository.
+
+`--service` deliberately reuses host lifecycle supervision, not a Compose
+restart policy: restarting the same container would reuse its consumed startup
+grant and filesystem. The token broker replaces host-side token injection, not
+the existing idle/drain machinery. No persistent multi-job runner is introduced.
+`build-runner/run-once.sh` remains a compatibility wrapper for `run.sh --once`.
 
 The runner version is pinned in `build-runner/Dockerfile`, and self-updates are disabled so an ephemeral runner does not replace its registration while processing its one job. At startup, the container checks GitHub's latest stable release and warns if its baked-in version is older. Update `RUNNER_VERSION` and rebuild the image regularly; GitHub stops assigning jobs to runners that have not been updated within its supported update window. See [GitHub's runner update guidance](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
@@ -89,7 +150,7 @@ Expiry first removes `docker-build`, waits at least 60 seconds, and rechecks Git
 
 ### Update an installed dispatch runtime
 
-Unchanged setup reruns reuse installed state. Changed runtime/configuration refuses installation while orchestration, dispatch, build supervision or operator drain is active, or a managed build container remains live. Do not dispatch while updating. For later upgrades, run these as root:
+Unchanged setup reruns reuse installed state and the running broker without resetting grants/cooldowns or worker state. Changed launcher/image inputs refuse active services before daemon/image changes; the full runtime guard also checks installed configuration. A live managed build container prevents changed installation. Do not dispatch while updating. For later upgrades, run these as root:
 
 ```sh
 sudo systemctl stop filius-dispatch.path
@@ -97,10 +158,17 @@ sudo systemctl status filius-dispatch.service --no-pager
 # Wait for any scan and orchestration job to finish before these stops.
 sudo systemctl stop filius-orchestrator.service filius-build-worker.service
 sudo bash /usr/local/lib/filius/host-control/drain.sh
+sudo systemctl stop filius-token-broker.service
 sudo /opt/filius/setup.sh
 ```
 
 Stopping build supervision leaves its launcher/container alone; the operator drain waits for active jobs or uses the same label/busy safety gate to retire an idle listener. It disables the worker without launching replacements. Setup restarts orchestration/request handling, not the drained build worker; manually dispatch when builds are queued again. Drain uses a transient `filius-build-drain.service`; its journal reports deferred conditions. Do not force-stop an uncertain/busy container to make installation pass.
+
+Stop any foreground `--all` worker and let its drain finish too. When upgrading
+from a pre-broker installation, skip the broker stop if that unit does not yet
+exist. Setup installs the broker unit/runtime idempotently and checks its local
+health endpoint before starting orchestration. It never writes token values to
+installed settings or resets persisted broker/worker state.
 
 Stopping/restarting orchestration can cancel its own active job. Setup can change packages/accounts/services and rebuild images; cgroup-delegation changes can restart the daemon and affect applications. Schedule it with no active jobs. `sudo systemctl restart filius-orchestrator.service` restarts only installed runtime, not checkout changes.
 
@@ -153,13 +221,18 @@ The persistent deployment directory is writable by the deployment job and privat
 
 ## Using more repositories
 
-The installed dispatch implementation currently supports only this repository. Adding allowlist entries is rejected until multi-repository support is implemented. Manual `run-once.sh` still registers to one supplied repository at a time; its PAT needs access and **Administration: Read and write** there. A personal account has no account-wide shared runner registration. Organization-scoped sharing is a separate GitHub feature, not required by this design.
+The installed dispatch and broker currently support only this repository.
+Adding allowlist entries is rejected until multi-repository support is
+implemented. Manual launchers now use the same installed broker eligibility.
+A personal account has no account-wide shared runner registration.
+Organization-scoped sharing is a separate GitHub feature, not required here.
 
 ## Troubleshooting
 
 - **Rootless Docker socket missing:** rerun `sudo ./rootless-docker/setup.sh`; check the printed systemd status command and the `filius-runner` user service.
 - **Runner image not found:** build it with the rootless daemon as shown above. Images in the rootful daemon are not visible to rootless Docker.
 - **GitHub API returns 403:** confirm repository access, **Administration: Read and write**, **Actions: Read**, token expiration and API rate limits. Errors never authorize launches or destructive expiry.
+- **Token startup fails/409/429:** inspect `sudo journalctl -u filius-token-broker.service --no-pager` as root. A grant is single-use even after failure; use a fresh launch. Repeated launches share the ten-attempt/60-second cooldown; wait rather than restarting the broker. These logs do not include token values.
 - **Job stays queued:** check that the runner is online and that the workflow's `runs-on` labels include `self-hosted` and `docker-build`.
 - **Dispatch stays queued:** check orchestration and its online `docker-orchestrate` runner; a `docker-build` runner cannot accept dispatch.
 - **Dispatch reports missing `/filius-control` directories:** it failed before host queue discovery. The orchestration container lacks the installed control mounts, usually because the server still uses the older runtime snapshot. Update the server checkout and follow the installation/upgrade procedure above; a push or image rebuild alone does not install the host Compose snapshot. Do not create directories inside the container: they would not connect to the host request service.
@@ -185,7 +258,11 @@ orchestration-runner/filius-orchestrator.service  Boot-persistent worker supervi
 build-runner/Dockerfile        GitHub Actions runner image
 build-runner/runner-entrypoint.sh  Runner registration and execution
 build-runner/build.sh          Build the runner image
-build-runner/run-once.sh       Request a token and run one ephemeral job
+build-runner/run-once.sh       Compatibility wrapper for run.sh --once
+build-runner/run.sh            --once, --all and --service host launcher
+build-runner/runner-token.sh   Startup client for the local one-shot token broker
+token-broker/broker.py         Host token service and root-only grant management
+token-broker/filius-token-broker.service  Boot-persistent local broker
 deployment-runner/Dockerfile   Runner image with Docker Compose
 deployment-runner/build.sh     Build the deployment runner image
 deployment-runner/run-once.sh  Start one ephemeral deployment job

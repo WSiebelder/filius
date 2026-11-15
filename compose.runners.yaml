@@ -3,6 +3,10 @@ services:
     image: ${RUNNER_IMAGE:-filius-builder:local}
     volumes:
       - type: bind
+        source: ${FILIUS_TOKEN_BROKER_DIR:-/var/lib/filius-control/token-broker}
+        target: /filius-token
+        read_only: true
+      - type: bind
         source: ${FILIUS_CONTROL_DIR:-/var/lib/filius-control}/requests
         target: /filius-control/requests
       - type: bind
@@ -11,7 +15,7 @@ services:
         read_only: true
     environment:
       GITHUB_URL: ${GITHUB_URL:?GITHUB_URL is required}
-      RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required}
+      FILIUS_RUNNER_INSTANCE: ${FILIUS_RUNNER_INSTANCE:?FILIUS_RUNNER_INSTANCE is required}
       RUNNER_NAME: ${RUNNER_NAME:?RUNNER_NAME is required}
       RUNNER_LABELS: self-hosted,linux,x64,docker-orchestrate
 
@@ -19,16 +23,24 @@ services:
     image: ${RUNNER_IMAGE:-filius-builder:local}
     volumes:
       - type: bind
+        source: ${FILIUS_TOKEN_BROKER_DIR:-/var/lib/filius-control/token-broker}
+        target: /filius-token
+        read_only: true
+      - type: bind
         source: ${DOCKER_SOCKET:?DOCKER_SOCKET must point to filius-runner's rootless Docker socket}
         target: /var/run/docker.sock
     environment:
       GITHUB_URL: ${GITHUB_URL:?GITHUB_URL is required}
-      RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required}
+      FILIUS_RUNNER_INSTANCE: ${FILIUS_RUNNER_INSTANCE:?FILIUS_RUNNER_INSTANCE is required}
       RUNNER_NAME: ${RUNNER_NAME:?RUNNER_NAME is required}
 
   deployment-runner:
     image: ${RUNNER_IMAGE:-filius-deployer:local}
     volumes:
+      - type: bind
+        source: ${FILIUS_TOKEN_BROKER_DIR:-/var/lib/filius-control/token-broker}
+        target: /filius-token
+        read_only: true
       - type: bind
         source: ${DOCKER_SOCKET:?DOCKER_SOCKET must point to filius-runner's rootless Docker socket}
         target: /var/run/docker.sock
@@ -37,6 +49,6 @@ services:
         target: ${FILIUS_DEPLOYMENTS_DIR:?FILIUS_DEPLOYMENTS_DIR is required}
     environment:
       GITHUB_URL: ${GITHUB_URL:?GITHUB_URL is required}
-      RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required}
+      FILIUS_RUNNER_INSTANCE: ${FILIUS_RUNNER_INSTANCE:?FILIUS_RUNNER_INSTANCE is required}
       RUNNER_NAME: ${RUNNER_NAME:?RUNNER_NAME is required}
       FILIUS_DEPLOYMENTS_DIR: ${FILIUS_DEPLOYMENTS_DIR:?FILIUS_DEPLOYMENTS_DIR is required}

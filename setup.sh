@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly runtime_dir=/usr/local/lib/filius
+readonly control_dir=/var/lib/filius-control
 readonly TOKEN_FILE="${GITHUB_PAT_FILE:-/etc/filius/github-token}"
 readonly REPO_FILE="${FILIUS_REPO_FILE:-/etc/filius/repository-url}"
 readonly RUNNER_USER="${RUNNER_USER:-filius-runner}"
@@ -87,6 +89,32 @@ umask 077
 printf '%s\n' "${github_url}" >"${REPO_FILE}"
 chmod 600 "${REPO_FILE}"
 
+# Check breaking launcher/image inputs before touching the daemon or images.
+for relative in build-runner/run.sh build-runner/run-once.sh build-runner/Dockerfile \
+  build-runner/runner-entrypoint.sh build-runner/runner-token.sh \
+  compose.runners.yaml host-control/controller.py token-broker/broker.py; do
+  if ! cmp -s "${SCRIPT_DIR}/${relative}" "${runtime_dir}/${relative}"; then
+    if [[ -f "${control_dir}/state/supervisor.lock" ]]; then
+      command -v flock >/dev/null || { echo "flock is required to check active build supervision." >&2; exit 1; }
+      if ! flock --nonblock "${control_dir}/state/supervisor.lock" true; then
+        echo "Stop/drain active build supervision before changing the runner/broker runtime; see README.md." >&2
+        exit 1
+      fi
+    fi
+    for unit in filius-orchestrator.service filius-build-worker.service filius-dispatch.path \
+      filius-dispatch.service filius-build-drain.service filius-token-broker.service; do
+      service_state="$(systemctl show --property=ActiveState --value "${unit}" 2>/dev/null || true)"
+      case "${service_state}" in
+        active|activating|deactivating)
+          echo "Stop ${unit} safely before changing the runner/broker runtime; see README.md." >&2
+          exit 1
+          ;;
+      esac
+    done
+    break
+  fi
+done
+
 echo "Setting up rootless Docker..."
 bash "${SCRIPT_DIR}/rootless-docker/setup.sh"
 
@@ -120,7 +148,7 @@ runuser -u "${RUNNER_USER}" -- env \
   DOCKER_HOST="unix://${docker_socket}" \
   DOCKER_SOCKET="${docker_socket}" \
   GITHUB_URL="https://github.com/${owner}/${repo}" \
-  RUNNER_TOKEN="setup-validation-placeholder" \
+  FILIUS_RUNNER_INSTANCE="setup-validation-placeholder" \
   RUNNER_NAME="setup-validation-placeholder" \
   FILIUS_DEPLOYMENTS_DIR="${RUNNER_HOME}/deployments" \
   docker compose --project-name filius-runners --file "${SCRIPT_DIR}/compose.runners.yaml" config --quiet
@@ -141,11 +169,9 @@ runuser -u "${RUNNER_USER}" -- env \
 command -v timeout >/dev/null || { echo "timeout is required for bounded orchestration shutdown." >&2; exit 1; }
 command -v flock >/dev/null || { echo "flock is required for managed build socket coordination." >&2; exit 1; }
 readonly orchestration_unit=filius-orchestrator.service
-readonly runtime_dir=/usr/local/lib/filius
 readonly unit_file="/etc/systemd/system/${orchestration_unit}"
 readonly dropin_dir="${unit_file}.d"
 readonly orchestration_env=/etc/filius/orchestration.env
-readonly control_dir=/var/lib/filius-control
 temporary_dir="$(mktemp -d)"
 cleanup_installation() {
   rm -f "${temporary_dir}/orchestration.env" "${temporary_dir}/rootless-docker.conf"
@@ -171,12 +197,17 @@ write_setting() {
   write_setting DOCKER_SOCKET "${docker_socket}"
   write_setting FILIUS_CONTROL_DIR "${control_dir}"
   write_setting FILIUS_ELIGIBILITY_FILE /etc/filius/eligible-repositories.json
+  write_setting FILIUS_TOKEN_BROKER_DIR "${control_dir}/token-broker"
 } >"${temporary_dir}/orchestration.env"
 printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' \
   "${runner_uid}" "${runner_uid}" >"${temporary_dir}/rootless-docker.conf"
 
 runtime_sources=(
   "${SCRIPT_DIR}/build-runner/run-once.sh"
+  "${SCRIPT_DIR}/build-runner/run.sh"
+  "${SCRIPT_DIR}/build-runner/Dockerfile"
+  "${SCRIPT_DIR}/build-runner/runner-entrypoint.sh"
+  "${SCRIPT_DIR}/build-runner/runner-token.sh"
   "${SCRIPT_DIR}/orchestration-runner/run-once.sh"
   "${SCRIPT_DIR}/compose.runners.yaml"
   "${SCRIPT_DIR}/orchestration-runner/filius-orchestrator.service"
@@ -190,9 +221,15 @@ runtime_sources=(
   "${SCRIPT_DIR}/host-control/filius-build-worker.service"
   "${temporary_dir}/rootless-docker.conf"
   "${temporary_dir}/rootless-docker.conf"
+  "${SCRIPT_DIR}/token-broker/broker.py"
+  "${SCRIPT_DIR}/token-broker/filius-token-broker.service"
 )
 runtime_targets=(
   "${runtime_dir}/build-runner/run-once.sh"
+  "${runtime_dir}/build-runner/run.sh"
+  "${runtime_dir}/build-runner/Dockerfile"
+  "${runtime_dir}/build-runner/runner-entrypoint.sh"
+  "${runtime_dir}/build-runner/runner-token.sh"
   "${runtime_dir}/orchestration-runner/run-once.sh"
   "${runtime_dir}/compose.runners.yaml"
   "${unit_file}"
@@ -206,6 +243,8 @@ runtime_targets=(
   /etc/systemd/system/filius-build-worker.service
   /etc/systemd/system/filius-dispatch.service.d/rootless-docker.conf
   /etc/systemd/system/filius-build-worker.service.d/rootless-docker.conf
+  "${runtime_dir}/token-broker/broker.py"
+  /etc/systemd/system/filius-token-broker.service
 )
 runtime_changed=0
 for i in "${!runtime_sources[@]}"; do
@@ -214,7 +253,7 @@ for i in "${!runtime_sources[@]}"; do
   fi
 done
 if ((runtime_changed)); then
-  for unit in "${orchestration_unit}" filius-build-worker.service filius-dispatch.path filius-dispatch.service filius-build-drain.service; do
+  for unit in "${orchestration_unit}" filius-build-worker.service filius-dispatch.path filius-dispatch.service filius-build-drain.service filius-token-broker.service; do
     service_state="$(systemctl show --property=ActiveState --value "${unit}" 2>/dev/null || true)"
     case "${service_state}" in
       active|activating|deactivating)
@@ -233,7 +272,8 @@ fi
 
 echo "Installing the root-owned orchestration and demand-enabled build runtime..."
 install -d -o root -g root -m 755 "${runtime_dir}" \
-  "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${runtime_dir}/host-control" "${dropin_dir}" \
+  "${runtime_dir}/build-runner" "${runtime_dir}/orchestration-runner" "${runtime_dir}/host-control" \
+  "${runtime_dir}/token-broker" "${dropin_dir}" \
   /etc/systemd/system/filius-dispatch.service.d /etc/systemd/system/filius-build-worker.service.d
 install -d -o root -g root -m 700 /etc/filius
 if [[ -L "${control_dir}" ]]; then
@@ -242,7 +282,7 @@ if [[ -L "${control_dir}" ]]; then
 fi
 # The daemon account may traverse this parent for bind mounts; other users may not.
 install -d -o root -g "$(id -gn "${RUNNER_USER}")" -m 710 "${control_dir}"
-for directory in requests results state; do
+for directory in requests results state token-broker; do
   if [[ -L "${control_dir}/${directory}" ]]; then
     echo "Refusing a symlink control subdirectory: ${directory}" >&2
     exit 1
@@ -251,6 +291,7 @@ done
 install -d -o root -g root -m 1733 "${control_dir}/requests"
 install -d -o root -g root -m 755 "${control_dir}/results"
 install -d -o root -g root -m 700 "${control_dir}/state"
+install -d -o root -g root -m 755 "${control_dir}/token-broker"
 for i in "${!runtime_sources[@]}"; do
   target="${runtime_targets[$i]}"
   mode=644
@@ -263,6 +304,20 @@ for i in "${!runtime_sources[@]}"; do
   fi
 done
 systemctl daemon-reload
+systemctl enable --now filius-token-broker.service
+broker_ready=0
+for ((attempt=0; attempt<30; attempt++)); do
+  if curl --silent --fail --connect-timeout 1 --max-time 1 \
+    --unix-socket "${control_dir}/token-broker/broker.sock" http://localhost/health >/dev/null; then
+    broker_ready=1
+    break
+  fi
+  sleep 1
+done
+if (( ! broker_ready )); then
+  echo "Token broker is not ready; inspect: sudo journalctl -u filius-token-broker.service" >&2
+  exit 1
+fi
 systemctl enable filius-build-worker.service
 systemctl enable --now filius-dispatch.path
 systemctl enable --now "${orchestration_unit}"
@@ -274,6 +329,7 @@ fi
 echo
 echo "Setup complete. The build and deployment runner images are ready and the GitHub API check passed."
 echo "The orchestration service is enabled and active. GitHub registration may still be starting."
+echo "The local one-shot token broker is ready; its PAT stays host-only."
 echo "Check readiness with: sudo journalctl -u ${orchestration_unit} -f"
 echo "Once the runner is online, manually dispatch dispatch_runner.yml to start/reuse one build worker for queued build work."
 echo "Build workers are not started by setup; previously enabled state is retained for boot recovery."

@@ -18,7 +18,7 @@ case "${1:-start}" in
     export RUNNER_KIND=orchestration
     export RUNNER_IMAGE=filius-builder:local
     export FILIUS_DEPLOYMENTS_DIR="${RUNNER_HOME}/deployments"
-    exec /usr/bin/bash "${SCRIPT_DIR}/../build-runner/run-once.sh" "${GITHUB_URL}"
+    exec /usr/bin/bash "${SCRIPT_DIR}/../build-runner/run.sh" --once "${GITHUB_URL}"
     ;;
   stop)
     docker info >/dev/null

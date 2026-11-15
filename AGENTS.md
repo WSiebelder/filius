@@ -74,7 +74,8 @@ is not a documented atomic drain API; uncertainty defers destructive action.
   the idle deadline; a fresh runner after completion gets a new idle period.
   Never kill an active job because of this limit, including jobs longer than
   eight hours. Expired workers remain disabled until dispatch finds eligible
-  work and revives them; setup/reboot/retry must not silently undo expiry.
+  work or an operator explicitly uses `--all`/`--service`; setup/reboot/retry
+  must not silently undo expiry.
 - Keep exactly one centrally registered deployment worker and execute
   deployment workflows in this repository, globally serialized. Dispatch
   starts it only when its central queue needs it. Application repositories
@@ -98,8 +99,23 @@ is not a documented atomic drain API; uncertainty defers destructive action.
   Changed delegation can restart the user manager/daemon and affect jobs/apps.
 - `build-runner/Dockerfile` builds `filius-builder:local`; jobs run as container
   UID 1001. `build-runner/runner-entrypoint.sh` registers and runs one job.
-- `build-runner/run-once.sh` is the shared root-only host launcher for build,
-  deployment and orchestration. Request a fresh registration token each launch.
+- `build-runner/run.sh` is the root-only launcher; `run-once.sh` is its
+  compatibility shim. `--once` launches one removable Compose runner.
+  `--all` uses foreground managed build supervision; `--service` reuses the
+  existing background build unit. Both retain single-worker/eight-hour state.
+  These explicit operator starts may wait for work; dispatch remains demand-only.
+- `token-broker/` owns the host-only Unix token service. The launcher creates
+  a five-minute root-authorized instance grant; image startup exchanges it
+  once for a fresh registration token. Consume before GitHub calls, including
+  failures; persist the ten-attempt/60-second global cooldown across restarts.
+  Do not reset broker/worker state on setup reruns or log credential values.
+- All runners mount only the broker socket directory read-only in addition to
+  their role's existing mounts. No PAT, token ledger, privileged bootstrap or
+  unmount capability enters the image. Jobs still run as UID 1001. Single-use
+  authorization is an accidental-loop safeguard for trusted workflows, not an
+  enterprise isolation mechanism or arbitrary URL/token-minting API.
+- The image temporarily supports explicit legacy registration tokens for
+  image-first upgrades; broker-authorized startups never fall back on failure.
 - `orchestration-runner/run-once.sh` launches/stops the managed orchestration
   container. Its systemd unit uses root-owned runtime files installed beneath
   `/usr/local/lib/filius`, not mutable admin-owned checkout scripts.
@@ -121,8 +137,8 @@ is not a documented atomic drain API; uncertainty defers destructive action.
 - `host-control/controller.py` is Python 3.8+ standard-library host logic.
   Install snapshots beneath `/usr/local/lib/filius`; root-owned eligibility
   remains authoritative. Requests cannot choose URLs, capacity or commands.
-  Orchestration gets only writable requests/read-only results, not state,
-  host code, PAT or Docker. Never write results through guest-controlled paths,
+  Orchestration gets writable requests/read-only results and the read-only
+  broker directory, not state, host code, PAT or Docker. Never write results through guest-controlled paths,
   follow request symlinks or source request payloads/service env as shell code.
 - `/var/lib/filius-control` allows traversal only by root/the dedicated daemon
   group; its `state` directory is root-private. Locks serialize activation and
@@ -143,6 +159,9 @@ Keep the host PAT outside the checkout, images and runner containers, normally
 at `/etc/filius/github-token` with root-only permissions. Pass only a fresh
 short-lived registration token at runner startup. Never put secrets in source,
 image layers, logs, committed environment files or service configuration.
+New launchers pass only an instance identifier in Compose environment; the
+entrypoint fetches the short-lived token over the Unix socket before registration
+and clears startup variables before running jobs.
 
 Host registration/label management requires repository Administration read/write
 for a fine-grained PAT; implemented queue discovery needs Actions read permission

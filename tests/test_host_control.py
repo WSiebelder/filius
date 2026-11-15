@@ -249,6 +249,50 @@ class HostTests(unittest.TestCase):
         self.assertFalse(self.host.load()["enabled"])
         self.host.activate.assert_not_called()
 
+    def test_manual_all_enables_without_queue_scan_or_background_service(self):
+        result = control.dispatch(self.host, manual=True, activate=False)
+        self.assertEqual(result["action"], "enabled")
+        self.assertTrue(self.host.load()["enabled"])
+        self.api.demand.assert_not_called()
+        self.host.activate.assert_not_called()
+
+    def test_manual_service_is_idempotent_and_preserves_a_healthy_idle_deadline(self):
+        self.assertEqual(control.dispatch(self.host, manual=True)["action"], "enabled")
+        deadline = control.time.time() + 100
+        self.state(idle_deadline=deadline)
+        self.assertEqual(control.dispatch(self.host, manual=True)["action"], "reused")
+        self.assertEqual(self.host.load()["idle_deadline"], deadline)
+        self.assertEqual(self.host.activate.call_count, 2)
+        self.api.demand.assert_not_called()
+
+    def test_foreground_supervision_refuses_a_competing_owner(self):
+        with self.host.lock("supervisor"):
+            with self.assertRaisesRegex(control.ControlError, "already active"):
+                with self.host.lock("supervisor", blocking=False):
+                    self.fail("Duplicate foreground supervisor acquired the lock")
+
+    def test_install_check_refuses_foreground_supervision_even_without_a_container(self):
+        with patch.object(control.os, "geteuid", return_value=0), \
+                patch.object(control, "Host", return_value=self.host), \
+                patch.object(control.sys, "argv", ["controller.py", "check-install"]), \
+                patch.dict(os.environ, {"DOCKER_SOCKET": "/unused-mocked-docker.sock"}):
+            with self.host.lock("supervisor"):
+                with self.assertRaisesRegex(control.ControlError, "already active"):
+                    control.main()
+            self.host.container.assert_not_called()
+            control.main()
+            self.host.container.assert_called_once_with(None)
+        self.host.api.assert_not_called()
+        self.host.activate.assert_not_called()
+
+    def test_launched_worker_is_separate_from_foreground_interrupts(self):
+        with patch.object(control.subprocess, "Popen") as launch:
+            control.Host.launch(self.host, "filius-build-" + "a" * 32)
+        arguments, settings = launch.call_args
+        self.assertIn("--once", arguments[0])
+        self.assertTrue(settings["start_new_session"])
+        self.assertEqual(settings["stdin"], control.subprocess.DEVNULL)
+
     def test_disabled_live_container_prevents_replacement(self):
         self.state(name="filius-build-" + "a" * 32)
         self.host.container.return_value = {"id": "container", "running": True}

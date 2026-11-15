@@ -176,9 +176,12 @@ class Host:
         )
 
     @contextlib.contextmanager
-    def lock(self, name):
+    def lock(self, name, blocking=True):
         with (self.state_dir / (name + ".lock")).open("a") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except BlockingIOError:
+                raise ControlError("Build supervision is already active; use --service to reuse it") from None
             yield
 
     def load(self):
@@ -259,18 +262,20 @@ class Host:
         environment.update(RUNNER_KIND="build", RUNNER_NAME=name,
                            RUNNER_IMAGE="filius-builder:local")
         return subprocess.Popen(
-            ["/usr/bin/bash", "/usr/local/lib/filius/build-runner/run-once.sh", self.repository],
+            ["/usr/bin/bash", "/usr/local/lib/filius/build-runner/run.sh", "--once", self.repository],
             env=environment,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
     def activate(self):
         self.command(["systemctl", "start", "--no-block", WORKER_UNIT])
 
 
-def dispatch(host):
+def dispatch(host, manual=False, activate=True):
     api = host.api()
-    demand = api.demand()
-    if not demand:
+    demand = None if manual else api.demand()
+    if not manual and not demand:
         return {"ok": True, "action": "no-op", "queued_jobs": 0}
     with host.lock("worker"):
         state = host.load()
@@ -291,18 +296,20 @@ def dispatch(host):
                 else:
                     raise ControlError("Cannot safely revive a quarantined/overdue runner with uncertain state")
                 host.save(state)
-            host.activate()
+            if activate:
+                host.activate()
             return {"ok": True, "action": "reused", "queued_jobs": demand}
         if container and container["running"]:
             raise ControlError("A disabled managed container is still live; refusing a replacement")
         # Demand can disappear between initial discovery and serialized activation.
-        demand = api.demand()
-        if not demand:
+        demand = None if manual else api.demand()
+        if not manual and not demand:
             return {"ok": True, "action": "no-op", "queued_jobs": 0}
         state.update(enabled=True, idle_deadline=None, seen_job=False,
                      quarantine=None, starting=None)
         host.save(state)
-        host.activate()
+        if activate:
+            host.activate()
         return {"ok": True, "action": "enabled", "queued_jobs": demand}
 
 
@@ -477,7 +484,7 @@ def main():
         raise ControlError("Host control must run as root")
     host = Host()
     command = sys.argv[1] if len(sys.argv) == 2 else ""
-    if command in ("scan", "worker", "drain", "check-install"):
+    if command in ("scan", "worker", "drain", "check-install", "all", "enable"):
         socket = os.environ.get("DOCKER_SOCKET")
         if not socket:
             raise ControlError("Installed DOCKER_SOCKET configuration is required")
@@ -489,14 +496,25 @@ def main():
     elif command in ("worker", "drain"):
         with host.lock("supervisor"):
             Worker(host).run(draining=command == "drain")
+    elif command == "all":
+        with host.lock("supervisor", blocking=False):
+            print(json.dumps(dispatch(host, manual=True, activate=False)), flush=True)
+            worker = Worker(host)
+            worker.run()
+            if host.load()["enabled"]:
+                print("Draining the foreground build worker without cancelling its job", flush=True)
+                worker.run(draining=True)
+    elif command == "enable":
+        print(json.dumps(dispatch(host, manual=True)), flush=True)
     elif command == "check-install":
-        with host.lock("worker"):
-            state = host.load()
-            container = host.container(state["name"])
-            if container and container["running"]:
-                raise ControlError("Wait for the managed build container to exit before runtime installation")
+        with host.lock("supervisor", blocking=False):
+            with host.lock("worker"):
+                state = host.load()
+                container = host.container(state["name"])
+                if container and container["running"]:
+                    raise ControlError("Wait for the managed build container to exit before runtime installation")
     else:
-        raise ControlError("Usage: controller.py scan|worker|drain|check-access|check-install|validate FILE URL")
+        raise ControlError("Usage: controller.py scan|worker|all|enable|drain|check-access|check-install|validate FILE URL")
 
 
 if __name__ == "__main__":

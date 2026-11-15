@@ -1,7 +1,7 @@
 [Unit]
 Description=Filius demand-enabled ephemeral build worker
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target filius-token-broker.service
+After=network-online.target filius-token-broker.service
 StartLimitIntervalSec=0
 
 [Service]

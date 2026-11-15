@@ -5,6 +5,7 @@ on:
     paths:
       - "build-runner/Dockerfile"
       - "build-runner/runner-entrypoint.sh"
+      - "build-runner/runner-token.sh"
       - "build-runner/build.sh"
       - "deployment-runner/Dockerfile"
       - "deployment-runner/build.sh"

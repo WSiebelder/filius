@@ -25,7 +25,8 @@ RUN apt-get update \
     && chown -R runner:runner /opt/actions-runner
 
 COPY runner-entrypoint.sh /usr/local/bin/runner-entrypoint
-RUN chmod 0755 /usr/local/bin/runner-entrypoint
+COPY runner-token.sh /usr/local/bin/runner-token
+RUN chmod 0755 /usr/local/bin/runner-entrypoint /usr/local/bin/runner-token
 
 ENV RUNNER_ALLOW_RUNASROOT=0 \
     RUNNER_VERSION=${RUNNER_VERSION} \

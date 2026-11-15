@@ -2,11 +2,21 @@
 set -euo pipefail
 
 : "${GITHUB_URL:?Set GITHUB_URL to the repository or organization URL}"
-: "${RUNNER_TOKEN:?Set RUNNER_TOKEN to a short-lived runner registration token}"
 
 runner_name="${RUNNER_NAME:-build-runner}"
 runner_labels="${RUNNER_LABELS:-self-hosted,linux,x64,docker-build}"
 current_version="${RUNNER_VERSION:-unknown}"
+if [[ -n "${FILIUS_RUNNER_INSTANCE:-}" ]]; then
+  unset RUNNER_TOKEN
+  runner_token="$(/usr/local/bin/runner-token)"
+else
+  # Allow image-first upgrades from an installed pre-broker host runtime.
+  : "${RUNNER_TOKEN:?Start this runner with the host run.sh launcher}"
+  echo "WARNING: Legacy registration-token startup; install the broker runtime with setup.sh." >&2
+  runner_token="${RUNNER_TOKEN}"
+fi
+unset RUNNER_TOKEN
+unset FILIUS_RUNNER_INSTANCE
 
 latest_version="$(curl --silent --show-error --fail --max-time 10 \
   --header 'Accept: application/vnd.github+json' \
@@ -22,7 +32,7 @@ fi
 
 ./config.sh \
   --url "${GITHUB_URL}" \
-  --token "${RUNNER_TOKEN}" \
+  --token "${runner_token}" \
   --name "${runner_name}" \
   --labels "${runner_labels}" \
   --work /home/runner/_work \
@@ -31,5 +41,5 @@ fi
   --unattended \
   --replace
 
-unset RUNNER_TOKEN
+unset runner_token
 ./run.sh
